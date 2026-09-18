@@ -205,7 +205,7 @@ class ToolManager:
             tool_impl = self.tool_registry.get(tool_name)
             timeout = 600 if tool_impl.__name__ == 'run_subagent' else self.timeout
             async with self.semaphore:
-                if getattr(tool_impl, '_is_mcp', False):
+                if getattr(tool_impl, '_is_mcp', False) or tool_name == 'run_subagent':
                     response = await asyncio.wait_for(tool_impl(**tool_args), timeout=timeout)
                 else:
                     response = await asyncio.wait_for(

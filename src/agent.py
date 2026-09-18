@@ -67,7 +67,7 @@ def retrieve_memory(
     return formatted_memory
 
 @subagent_exclude
-def run_subagent(
+async def run_subagent(
         task: Annotated[str, Field(description="The task assigned to the subagent")],
         skill: Annotated[str, Field(description="The available Skill required to complete the task", default="")],
         label: Annotated[str, Field(description="Label to identify this subagent", default="Sub-Agent")]
@@ -78,7 +78,7 @@ def run_subagent(
     if skill:
         # 子Agent不做渐进式加载，而是直接激活最多一个与任务相关的 Skill
         sub_ctx_manager.activate_skill(skill)
-    response = asyncio.run(run_agent(task, sub_ctx_manager, is_sub=True, agent_label=label))
+    response = await run_agent(task, sub_ctx_manager, is_sub=True, agent_label=label)
     return f"[subagent({label})] {response}"
 
 tool_manager.register(active_skill, load_skill_resource, retrieve_memory, run_subagent)
