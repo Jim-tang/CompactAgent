@@ -99,6 +99,7 @@ async def run_agent(user_input: str, ctx_manager: AgentContextManager, max_itera
         parsed = json.loads(response[5:])
         if "error" in parsed:
             raise Exception(f"API返回错误: {parsed.get('error')}")
+
         response = ChatCompletion.model_validate(parsed)
         assist_message = response.choices[0].message
         ctx_manager.add_history(assist_message.model_dump())
@@ -115,9 +116,9 @@ async def run_agent(user_input: str, ctx_manager: AgentContextManager, max_itera
             tool_message = {"role": "tool", "tool_call_id": tool_call.id, "content": function_response}
             ctx_manager.add_history(tool_message)
 
-            # 催更机制（Nag Reminer）：连续 5 轮没有调用 todo_write 的话自动注入提醒
-            if tool_manager.rounds_since_todo >= 5:
-                ctx_manager.add_history({"role": "system", "content": "<reminder>Update your todos.</reminder>"})
+        # 催更机制（Nag Reminer）：连续 5 轮没有调用 todo_write 的话自动注入提醒
+        if tool_manager.rounds_since_todo >= 5:
+            ctx_manager.add_history({"role": "system", "content": "<reminder>Update your todos.</reminder>"})
 
     # 超出循环上限时返回对话历史的梗概
     full_history = ctx_manager.get_messages_text(ctx_manager.history_messages)

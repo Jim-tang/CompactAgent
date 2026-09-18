@@ -150,7 +150,7 @@ class ToolManager:
         self.mcp_tool_schemas = []
         asyncio.run(self.register_mcp_tools())
         self.register(read_file, write_file, edit_file, bash, todo_write)
-        self.rounds_since_todo = 0  # todo reminder 计数器
+        self.rounds_since_todo = -1  # todo reminder 计数器
 
     def register(self, *func: Callable):
         """将普通函数注册成工具函数"""
@@ -226,7 +226,8 @@ class ToolManager:
         # 记录连续有多少轮tool_call没有更新todo
         if tool_name == 'todo_write':
             self.rounds_since_todo = 0
-        else:
+        elif self.rounds_since_todo >= 0:
+            # 初始为负值，只有非负时才加一，防止不需要调用 todo_write 的任务触发催更
             self.rounds_since_todo += 1
 
         return response
