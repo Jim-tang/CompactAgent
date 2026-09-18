@@ -155,8 +155,7 @@ class AgentContextManager:
             response = await self.llm_client.chat.completions.create(
             model=os.environ.get("MODEL"),
             messages=messages,
-            temperature=0.3,
-            max_tokens=300,
+            temperature=0.3
         )
         if isinstance(response, str) and response.startswith("data:"):
             # 转换SSE格式的接口响应
@@ -222,6 +221,30 @@ class AgentContextManager:
             rounds.append(current_round)
         return rounds
 
+    @staticmethod
+    def _find_safe_split(messages: List[dict], keep_recent: int) -> int:
+        """找到压缩消息列表的安全切分点，避免要保留的部分出现“孤儿”工具消息"""
+        split_idx = max(0, len(messages) - keep_recent)
+
+        # 切分点不在 tool 上，直接返回
+        if split_idx >= len(messages) or messages[split_idx].get("role") != "tool":
+            return split_idx
+
+        # 场景 1：尝试回退到最近的 assistant(tool_calls) 之前，整组保留
+        max_lookback = keep_recent
+        for offset in range(1, max_lookback + 1):
+            i = split_idx - offset
+            if i < 0:
+                break
+            msg = messages[i]
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                return i
+
+        # 场景 2：回溯 max 步还是 tool 消息（超大工具组）那就向前移，让整个工具组进入 to_compress
+        while split_idx < len(messages) and messages[split_idx].get("role") == "tool":
+            split_idx += 1
+        return split_idx
+
     async def compact_history(self, max_workers: int = 5) -> List[dict]:
         """
         压缩历史消息，具体策略：
@@ -229,11 +252,13 @@ class AgentContextManager:
         - 每个轮次的所有消息压缩为一条摘要，同时保留 user 消息原文
         - 压缩后的轮次按原序排列，再拼接上尾部 recent 消息，替换内部维护的对话历史列表
         """
-        print("⏳ 正在执行上下文压缩...")
         # 分割待压缩部分 + 保留部分
         keep_recent = self.compress_config.get("keep_recent", 10)
-        to_compress = self.history_messages[:-keep_recent]
-        recent = self.history_messages[-keep_recent:]
+        split_idx = self._find_safe_split(self.history_messages, keep_recent)
+        to_compress = self.history_messages[:split_idx]
+        recent = self.history_messages[split_idx:]
+
+        print(f"⏳ 正在执行上下文压缩 (compress_msg={len(to_compress)}, keep_msg={len(recent)})")
 
         # 分割待压缩的对话轮次
         rounds = self._split_into_rounds(to_compress)
