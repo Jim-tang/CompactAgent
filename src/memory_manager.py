@@ -20,6 +20,7 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
 from rank_bm25 import BM25Okapi
 
+from common_utils import get_messages_text
 
 jieba.setLogLevel(jieba.logging.ERROR)
 
@@ -158,7 +159,8 @@ class MemoryManager:
             persist_directory=persist_directory,
         )
 
-        self.session_file_path = "Sessions.md"
+
+        self.session_dir = "session"
         self.memory_collections = {"session": session_collection, "long_term": long_term_collection}
         self.session_ttl = session_ttl_seconds
         self.retrieve_threshold = retrieve_threshold
@@ -345,19 +347,21 @@ class MemoryManager:
                     long_mem_ids.append(long_mem_id)
         return long_mem_ids
 
-    async def record_session(self, history_text: str) -> str:
+    async def record_session(self, session_msg: list[dict]) -> str:
         """提炼并存储本次会话的对话历史并记录至 Sessions.md"""
-        if not history_text:
+        if not session_msg:
             return "Empty session history, skip recording"
+        history_text = get_messages_text(session_msg)
         session_note = await self.extract_session(history_text)
-        topic = session_note.get("topic")
-        metadata = {"content": session_note.get("content")}
-        await asyncio.to_thread(self.add_memory, topic, metadata=metadata)
-        await asyncio.to_thread(self.update_session)
-        print(f"已保存会话记录 - 主题：{topic}")
+        topic = session_note.get("topic", "")
+        summary = session_note.get("content", "")
+        timestamp = datetime.now().isoformat()
+        await asyncio.to_thread(self.add_memory, topic, metadata={"content": summary})
+        await asyncio.to_thread(self.update_session_md, topic, summary, timestamp)
+        await asyncio.to_thread(self.save_session_json, topic, summary, timestamp, session_msg)
         return topic
 
-    async def extract_session(self, history_text):
+    async def extract_session(self, history_text: str):
         messages = [
             {"role": "system", "content": "你是一个会话分析与记忆提取专家。"},
             {"role": "user", "content": RECORD_SESSION_PROMPT.format(conversation_history=history_text)},
@@ -370,14 +374,54 @@ class MemoryManager:
                 content = re.sub(r'^```(?:json)?\s*', '', content).replace("```", "")
             return json.loads(content)
         except Exception as e:
-            print(f"记录本次会话历史时发生错误: {e}")
+            print(f"记录本次会话历史时发生错误: {e}\n============== content ==============\n{content}")
             return {}
+
+    def save_session_json(self, topic: str, summary: str, timestamp: str, session_msg: list[dict]) -> None:
+        """将完整对话历史保存为 JSON 文件"""
+        try:
+            os.makedirs(self.session_dir, exist_ok=True)
+            safe_topic = re.sub(r'[<>:"/\\|?*]', '_', topic)
+            safe_timestamp = datetime.fromisoformat(timestamp).strftime("%Y%m%d_%H%M%S")
+            filepath = os.path.join(self.session_dir, f"{safe_timestamp}_{safe_topic}.json")
+            session_data = {
+                "topic": topic,
+                "summary": summary,
+                "timestamp": datetime.now().isoformat(),
+                "messages": session_msg,
+            }
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(session_data, f, ensure_ascii=False, indent=2)
+            print(f"已保存会话 JSON: {filepath}")
+        except Exception as e:
+            print(f"⚠️ 保存会话 JSON 失败: {e}")
+
+    def update_session_md(self, topic: str, content: str, timestamp: str) -> None:
+        """将新的会话条目增量追加到 Sessions.md（插入到文件开头）"""
+        entry_lines = [
+            f"### {topic}\n",
+            f"> **{datetime.fromisoformat(timestamp).strftime('%Y-%m-%d %H:%M:%S')}**\n",
+            f"> {content}\n",
+            "---\n",
+        ]
+        entry_text = "".join(entry_lines)
+        session_file_path = os.path.join(self.session_dir, "Sessions.md")
+        if os.path.exists(session_file_path):
+            with open(session_file_path, "r", encoding="utf-8") as f:
+                existing = f.read()
+            new_content = entry_text + existing
+        else:
+            new_content = entry_text
+
+        with open(session_file_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
 
     def read_sessions(self) -> List[Dict]:
         """从 sessions.md 解析近期的会话列表"""
-        if not os.path.exists(self.session_file_path):
+        session_file_path = os.path.join(self.session_dir, "Sessions.md")
+        if not os.path.exists(session_file_path):
             return []
-        with open(self.session_file_path, "r", encoding="utf-8") as f:
+        with open(session_file_path, "r", encoding="utf-8") as f:
             content = f.read()
         sessions = []
         # 正则匹配格式： ### topic\n\n> **timestamp**\n> content\n\n---
@@ -390,33 +434,3 @@ class MemoryManager:
                 "content": content_text.strip()
             })
         return sessions
-
-    def write_sessions(self, sessions: List[Dict]) -> None:
-        """将会话列表写入 sessions.md（覆盖写入）"""
-        lines = []
-        for sess in sessions:
-            timestamp = datetime.fromisoformat(sess['timestamp']).strftime("%Y-%m-%d %H:%M:%S")
-            lines.append(f"### {sess['topic']}\n")
-            lines.append(f"> **{timestamp}**")
-            lines.append(f"> {sess['content']}\n")
-            lines.append("---")
-        with open(self.session_file_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-
-    def update_session(self) -> None:
-        """从短期记忆库中读取所有内容，更新 sessions.md 文件"""
-        # 获取短期记忆库中所有文档
-        all_short = self.memory_collections['session'].get(include=["documents", "metadatas"])
-        sessions = []
-        for idx, doc_id in enumerate(all_short['ids']):
-            topic = all_short['documents'][idx]
-            meta = all_short['metadatas'][idx]
-            sessions.append({
-                "topic": topic,
-                "content": meta.get("content", ""),
-                "timestamp": meta.get("timestamp", ""),
-            })
-    
-        # 按时间戳降序排序（最新的在前）
-        sessions.sort(key=lambda x: x["timestamp"], reverse=True)
-        self.write_sessions(sessions)

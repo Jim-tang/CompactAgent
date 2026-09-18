@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
 
-from common_utils import get_workspace_tree
+from common_utils import get_workspace_tree, get_messages_text
 
 COMPRESSION_PROMPT = """
 You are a conversation summarization expert. Please compress the message list provided by the user into a dialogue summary written from the Assistant's perspective. The compression requirements are as follows:
@@ -112,7 +112,7 @@ class AgentContextManager:
         active_ext = self.get_active_context_extension()
         if active_ext:
             extended_content += "\n" + active_ext
-        ws_tree = get_workspace_tree(os.getcwd(), excludes=["mcp_service", "skills", "chroma_db"])
+        ws_tree = get_workspace_tree(os.getcwd(), excludes=["mcp_service", "skills", "chroma_db", "session"])
         extended_content += f"\n[Workspace Tree] (depth=3):\n{ws_tree}"
         system_message = [{"role": "system", "content": extended_content}]
         return system_message
@@ -145,11 +145,11 @@ class AgentContextManager:
         self.loaded_resources[key] = content
         return f"Resource loaded. Content preview:\n{content[:200]}"
 
-    async def summarize_with_llm(self, text: str) -> str:
+    async def summarize_with_llm(self, history_msg: list[dict]) -> str:
         """调用 LLM 接口生成历史对话的摘要"""
         messages = [
             {"role": "system", "content": COMPRESSION_PROMPT},
-            {"role": "user", "content": text},
+            {"role": "user", "content": get_messages_text(history_msg)},
         ]
         async with self._semaphore:
             response = await self.llm_client.chat.completions.create(
@@ -262,9 +262,7 @@ class AgentContextManager:
 
         # 分割待压缩的对话轮次
         rounds = self._split_into_rounds(to_compress)
-        round_texts = [self.get_messages_text(round_msgs) for round_msgs in rounds]
-
-        tasks = [self.summarize_with_llm(text) for text in round_texts]
+        tasks = [self.summarize_with_llm(round_msgs) for round_msgs in rounds]
         thread_results = await asyncio.gather(*tasks)
 
         # 按原始轮次顺序构建压缩后的消息列表
@@ -276,32 +274,6 @@ class AgentContextManager:
         self.history_messages = compressed_rounds + recent
 
         return self.history_messages
-
-    @staticmethod
-    def get_messages_text(messages: List[dict]) -> str:
-        messages_text = ""
-        for msg in messages:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            tool_calls = msg.get("tool_calls", [])
-
-            # 构建单条消息的文本表示
-            msg_text = f"{role.upper()}: {content}"
-            if tool_calls:
-                tool_calls_list = []
-                for tc in tool_calls:
-                    function = tc.get("function", {})
-                    if not function:
-                        continue
-                    func_name = function.get("name", "unknown_tool")
-                    func_args = function.get("arguments", "")
-                    tool_calls_list.append(f"{func_name}({func_args})")
-                if tool_calls_list:
-                    tool_calls_str = f" tool_calls: {', '.join(tool_calls_list)}"
-                    msg_text += tool_calls_str
-            messages_text += msg_text + "\n"
-
-        return messages_text
 
     def reset_session(self):
         """新会话时重置历史对话和激活的技能栈"""

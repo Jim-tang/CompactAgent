@@ -1,6 +1,6 @@
 import re
 import os
-from typing import Optional, Literal, get_origin, get_args
+from typing import Optional, Literal, get_origin, get_args, List
 from pydantic import BaseModel
 
 def subagent_exclude(func):
@@ -98,6 +98,31 @@ def type_to_json_schema(tp):
 
     # 如果都未匹配，兜底为 string
     return {"type": "string"}
+
+
+def get_messages_text(messages: List[dict]) -> str:
+    messages_text = ""
+    for msg in messages:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        tool_calls = msg.get("tool_calls", [])
+
+        msg_text = f"{role.upper()}: {content}"
+        if tool_calls:
+            tool_calls_list = []
+            for tc in tool_calls:
+                function = tc.get("function", {})
+                if not function:
+                    continue
+                func_name = function.get("name", "unknown_tool")
+                func_args = function.get("arguments", "")
+                tool_calls_list.append(f"{func_name}({func_args})")
+            if tool_calls_list:
+                tool_calls_str = f" tool_calls: {', '.join(tool_calls_list)}"
+                msg_text += tool_calls_str
+        messages_text += msg_text + "\n"
+
+    return messages_text
 
 
 if __name__ == "__main__":

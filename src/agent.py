@@ -121,8 +121,7 @@ async def run_agent(user_input: str, ctx_manager: AgentContextManager, max_itera
             ctx_manager.add_history({"role": "system", "content": "<reminder>Update your todos.</reminder>"})
 
     # 超出循环上限时返回对话历史的梗概
-    full_history = ctx_manager.get_messages_text(ctx_manager.history_messages)
-    summary = await ctx_manager.summarize_with_llm(full_history)
+    summary = await ctx_manager.summarize_with_llm(ctx_manager.history_messages)
     return f"Max iterations reached, summary:\n{summary}"
 
 async def main():
@@ -144,8 +143,7 @@ async def main():
                 break
             elif cmd == '/reset':
                 # 记录当前会话历史
-                full_history = context_manager.get_messages_text(context_manager.history_messages)
-                await memory_manager.record_session(full_history)
+                await memory_manager.record_session(context_manager.history_messages)
                 # 清空上下文历史，开始新会话
                 context_manager.reset_session()
                 print("🔄 会话已重置，可以开始新的对话。")
@@ -168,10 +166,7 @@ async def main():
             print(f"发生错误: {e}")
 
     # 程序退出前，记录本次会话
-    full_history = context_manager.get_messages_text(context_manager.history_messages)
-    await memory_manager.record_session(full_history)
-
-    print("程序已退出。")
+    await memory_manager.record_session(context_manager.history_messages)
 
 
 if __name__ == "__main__":
