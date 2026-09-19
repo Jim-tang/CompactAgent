@@ -4,12 +4,10 @@ import re
 import yaml
 import asyncio
 import tiktoken
-import httpx
 from pathlib import Path
 from typing import Dict, List, Optional
-from openai import AsyncOpenAI
-from openai.types.chat import ChatCompletion
 
+from llm_client import OpenAIClient
 from common_utils import get_workspace_tree, get_messages_text
 
 COMPRESSION_PROMPT = """
@@ -35,15 +33,14 @@ class AgentContextManager:
     管理 Agent 对话历史和 Skill 的渐进式披露
     支持根据 token 阈值或消息数量自动压缩历史，避免超出上下文窗口限制
     """
-    def __init__(self, llm_client: AsyncOpenAI, compress_config: Optional[Dict] = None, skills_root: str = "skills"):
-        self.llm_client = llm_client            # 用于生成摘要的 AsyncOpenAI 客户端
+    def __init__(self, llm_client: OpenAIClient, compress_config: Optional[Dict] = None, skills_root: str = "skills"):
+        self.llm_client = llm_client            # 用于生成摘要的 OpenAIClient 客户端
         self.compress_config = compress_config  # 上下文压缩配置字典
         self.skills_root = Path(skills_root)    # 技能文件夹根路径
         self.metadata_cache = {}                # 存储所有技能元数据的字典
         self.active_instructions = {}           # 存储当前已激活技能的完整指令的字典
         self.loaded_resources = {}              # 存储已加载的技能资源文件的字典
         self.history_messages = []              # 历史对话（不含 system）放到管理器内部维护
-        self._semaphore = asyncio.Semaphore(3)  # 限制对 LLM 的并发调用数量
         self._load_all_metadata()
 
     def _load_all_metadata(self):
@@ -112,7 +109,7 @@ class AgentContextManager:
         active_ext = self.get_active_context_extension()
         if active_ext:
             extended_content += "\n" + active_ext
-        ws_tree = get_workspace_tree(os.getcwd(), excludes=["mcp_service", "skills", "chroma_db", "session"])
+        ws_tree = get_workspace_tree(os.getcwd(), excludes=["mcp_service", "skills", "chroma_db"])
         extended_content += f"\n[Workspace Tree] (depth=3):\n{ws_tree}"
         system_message = [{"role": "system", "content": extended_content}]
         return system_message
@@ -151,19 +148,8 @@ class AgentContextManager:
             {"role": "system", "content": COMPRESSION_PROMPT},
             {"role": "user", "content": get_messages_text(history_msg)},
         ]
-        async with self._semaphore:
-            response = await self.llm_client.chat.completions.create(
-            model=os.environ.get("MODEL"),
-            messages=messages,
-            temperature=0.3
-        )
-        if isinstance(response, str) and response.startswith("data:"):
-            # 转换SSE格式的接口响应
-            parsed = json.loads(response[5:])
-            if "error" in parsed:
-                raise Exception(f"API返回错误: {parsed.get('error')}")
-            response = ChatCompletion.model_validate(parsed)
-        summary = response.choices[0].message.content.strip()
+        response = await self.llm_client.invoke(messages, temperature=0.3)
+        summary = response.get("content", "").strip()
         print("[Summary]", summary.replace('\n', ' ').replace('\r', ' ')[:200])
         return summary
 

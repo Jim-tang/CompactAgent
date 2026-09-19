@@ -1,24 +1,14 @@
-import json
-import os
-import httpx
 import asyncio
 from typing import Annotated
 from pydantic import Field
-from openai import AsyncOpenAI
-from openai.types.chat import ChatCompletion
 
+from llm_client import OpenAIClient
 from context_manager import AgentContextManager
 from hook_manager import AgentHookManager
 from tool_manager import ToolManager
 from memory_manager import MemoryManager
 from common_utils import subagent_exclude
 
-os.environ['MODEL'] = 'MiniMax-M2.7'
-client = AsyncOpenAI(
-    base_url="http://127.0.0.1:8080/v1",
-    api_key="123",
-    http_client=httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(proxy=None)),
-)
 
 # 全局上下文压缩配置
 COMPRESSION_CONFIG = {
@@ -30,10 +20,12 @@ COMPRESSION_CONFIG = {
 }
 
 # 全局管理器实例
-memory_manager = MemoryManager()
+llm_client = OpenAIClient()
+context_manager = AgentContextManager(llm_client, COMPRESSION_CONFIG)  # 管理主Agent上下文
+memory_manager = MemoryManager(llm_client)
 hook_manager = AgentHookManager()
 tool_manager = ToolManager()
-context_manager = AgentContextManager(client, COMPRESSION_CONFIG)  # 管理主Agent上下文
+
 
 @subagent_exclude
 def active_skill(
@@ -74,7 +66,7 @@ async def run_subagent(
 ) -> str:
     """Run a subagent with fresh conversation context and one matched skill (if necessary), then return its final response."""
     # 子Agent独立的上下文管理器
-    sub_ctx_manager = AgentContextManager(client, COMPRESSION_CONFIG)
+    sub_ctx_manager = AgentContextManager(llm_client, COMPRESSION_CONFIG)
     if skill:
         # 子Agent不做渐进式加载，而是直接激活最多一个与任务相关的 Skill
         sub_ctx_manager.activate_skill(skill)
@@ -90,31 +82,22 @@ async def run_agent(user_input: str, ctx_manager: AgentContextManager, max_itera
     ctx_manager.add_history({"role": "user", "content": user_input})
 
     for _ in range(max_iterations):
-        messages = await ctx_manager.prepare_message(system_prompt)  # 一站式上下文处理：扩展 + 压缩
-        response = await client.chat.completions.create(
-            model=os.environ.get("MODEL"),
+        messages = await ctx_manager.prepare_message(system_prompt)
+        response = await llm_client.invoke(
             messages=messages,
             tools=tool_manager.generate_openai_tool_schema(is_sub),
         )
-        parsed = json.loads(response[5:])
-        if "error" in parsed:
-            raise Exception(f"API返回错误: {parsed.get('error')}")
+        ctx_manager.add_history(response)
 
-        response = ChatCompletion.model_validate(parsed)
-        assist_message = response.choices[0].message
-        ctx_manager.add_history(assist_message.model_dump())
-
-        if not assist_message.tool_calls:
-            # ★最终输出护栏★
-            return hook_manager.emit("on_agent_end", assist_message.content)
-
-        for tool_call in assist_message.tool_calls:
-            function_payload = getattr(tool_call, "function", None)
-            if function_payload is None:
-                continue
-            function_response = await tool_manager.exec_tool_call(function_payload.model_dump(), hook_manager, agent_label)
-            tool_message = {"role": "tool", "tool_call_id": tool_call.id, "content": function_response}
-            ctx_manager.add_history(tool_message)
+        if response.get("tool_calls"):
+            for tc in response.get("tool_calls"):
+                if not tc.get("function"):
+                    continue
+                function_response = await tool_manager.exec_tool_call(tc.get("function"), hook_manager, agent_label)
+                tool_message = {"role": "tool", "tool_call_id": tc.get("id"), "content": function_response}
+                ctx_manager.add_history(tool_message)
+        else:
+            return hook_manager.emit("on_agent_end", response.get("content"))
 
         # 催更机制（Nag Reminer）：连续 5 轮没有调用 todo_write 的话自动注入提醒
         if tool_manager.rounds_since_todo >= 5:

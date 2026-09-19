@@ -3,11 +3,11 @@ os.environ['ANONYMIZED_TELEMETRY'] = 'false'  # 禁用 Chroma 遥测数据收集
 
 import re
 import json
-import httpx
-import jieba
+import rjieba
 import numpy as np
 import asyncio
 import threading
+import transformers
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
@@ -15,14 +15,12 @@ from langchain_chroma import Chroma
 from langchain_classic.schema import Document
 from FlagEmbedding import FlagReranker
 from langchain_huggingface import HuggingFaceEmbeddings
-from openai import OpenAI
-from openai import AsyncOpenAI
-from openai.types.chat import ChatCompletion
 from rank_bm25 import BM25Okapi
 
+from llm_client import OpenAIClient
 from common_utils import get_messages_text
 
-jieba.setLogLevel(jieba.logging.ERROR)
+transformers.logging.set_verbosity_error()
 
 CONSOLIDATE_PROMPT = """
 以下是一个包含若干条近期会话记录的列表，请逐条分析每条记录的重要性（0.0 ~ 1.0 分），然后将其概括为语义简洁、自包含的长期记忆，务必保留关键信息。
@@ -104,14 +102,14 @@ class BM25Index:
     def rebuild(self, docs: List[Document]):
         """用新的文档列表重建索引"""
         self.docs = docs
-        tokenized_corpus = [list(jieba.cut(doc.page_content)) for doc in docs]
+        tokenized_corpus = [list(rjieba.cut(doc.page_content)) for doc in docs]
         self.bm25 = BM25Okapi(tokenized_corpus)
 
     def get_scores(self, query: str) -> np.ndarray:
         """返回查询与所有文档的 BM25 得分"""
         if self.bm25 is None or not self.docs:
             return np.array([])
-        tokenized_query = list(jieba.cut(query))
+        tokenized_query = list(rjieba.cut(query))
         return np.array(self.bm25.get_scores(tokenized_query))
 
 class MemoryManager:
@@ -125,6 +123,7 @@ class MemoryManager:
 
     def __init__(
         self,
+        llm_client: OpenAIClient,
         persist_directory: str = "./chroma_db",
         embedding_model: str = "BAAI/bge-m3",
         session_ttl_seconds: int = 3600,         # 短期记忆存活时间（秒）
@@ -132,17 +131,7 @@ class MemoryManager:
         importance_threshold: float = 0.6,          # 重要性阈值（0~1），高于此值才转为长期记忆
         hybrid_weights: Tuple[float, float] = (0.6, 0.4),  # (语义权重, BM25权重)
     ):
-        self.async_client = AsyncOpenAI(
-            base_url="http://127.0.0.1:8080/v1",
-            api_key="123",
-            http_client=httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(proxy=None))
-        )
-
-        self.client = OpenAI(
-            base_url="http://127.0.0.1:8080/v1",
-            api_key="123",
-            http_client=httpx.Client(transport=httpx.HTTPTransport(proxy=None)),
-        )
+        self.llm_client = llm_client
 
         # 嵌入模型（本地部署）
         embeddings = LocalEmbeddings(embedding_model)
@@ -317,9 +306,8 @@ class MemoryManager:
                     {"role": "user", "content": CONSOLIDATE_PROMPT.format(memories_text=memories_text)},
                 ]
                 try:
-                    response = await self.async_client.chat.completions.create(model=os.environ.get("MODEL"), messages=messages)
-                    response = ChatCompletion.model_validate(json.loads(response[5:]))
-                    content = response.choices[0].message.content.strip()
+                    response = await self.llm_client.invoke(messages)
+                    content = response.get("content", "").strip()
                     if content.startswith("```json"):
                         content = re.sub(r'^```(?:json)?\s*', '', content).replace("```", "")
                     items = json.loads(content)
@@ -367,9 +355,8 @@ class MemoryManager:
             {"role": "user", "content": RECORD_SESSION_PROMPT.format(conversation_history=history_text)},
         ]
         try:
-            response = await self.async_client.chat.completions.create(model=os.environ.get("MODEL"), messages=messages)
-            response = ChatCompletion.model_validate(json.loads(response[5:]))
-            content = response.choices[0].message.content.strip()
+            response = await self.llm_client.invoke(messages)
+            content = response.get("content", "").strip()
             if content.startswith("```json"):
                 content = re.sub(r'^```(?:json)?\s*', '', content).replace("```", "")
             return json.loads(content)
