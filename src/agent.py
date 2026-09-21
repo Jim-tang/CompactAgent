@@ -78,7 +78,7 @@ tool_manager.register(active_skill, load_skill_resource, retrieve_memory, run_su
 async def run_agent(user_input: str, ctx_manager: AgentContextManager, max_iterations: int = 30, is_sub: bool = False, agent_label: str = "") -> str:
     system_prompt = "You are a helpful assistant. Be concise."
     # ★用户输入护栏★
-    user_input = hook_manager.emit("on_agent_start", user_input)
+    user_input = await hook_manager.emit("on_agent_start", user_input)
     ctx_manager.add_history({"role": "user", "content": user_input})
 
     for _ in range(max_iterations):
@@ -90,14 +90,18 @@ async def run_agent(user_input: str, ctx_manager: AgentContextManager, max_itera
         ctx_manager.add_history(response)
 
         if response.get("tool_calls"):
+            tool_call_tasks = []
             for tc in response.get("tool_calls"):
                 if not tc.get("function"):
                     continue
-                function_response = await tool_manager.exec_tool_call(tc.get("function"), hook_manager, agent_label)
-                tool_message = {"role": "tool", "tool_call_id": tc.get("id"), "content": function_response}
+                task = asyncio.create_task(tool_manager.exec_tool_call(tc, hook_manager, agent_label))
+                tool_call_tasks.append(task)
+            for coro in asyncio.as_completed(tool_call_tasks):
+                tool_call_id, function_response = await coro
+                tool_message = {"role": "tool", "tool_call_id": tool_call_id, "content": function_response}
                 ctx_manager.add_history(tool_message)
         else:
-            return hook_manager.emit("on_agent_end", response.get("content"))
+            return await hook_manager.emit("on_agent_end", response.get("content"))
 
         # 催更机制（Nag Reminer）：连续 5 轮没有调用 todo_write 的话自动注入提醒
         if tool_manager.rounds_since_todo >= 5:

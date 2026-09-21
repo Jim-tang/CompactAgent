@@ -181,31 +181,32 @@ class ToolManager:
                 adapter._is_mcp = True
                 self.register(adapter)
 
-    async def exec_tool_call(self, tool_info: dict, hook_manager, agent_label: str = "") -> str:
+    async def exec_tool_call(self, tc_info: dict, hook_manager, agent_label: str = "") -> tuple:
         """封装通用的工具执行流程"""
-        tool_name = tool_info.get("name")
+        tool_call_id = tc_info.get("id")
+        tool_name = tc_info.get("function").get("name", "")
         if tool_name not in self.tool_registry:
-            return f"Error: Unknown tool '{tool_name}'"
+            return tool_call_id, f"Error: Unknown tool '{tool_name}'"
 
-        raw_args = tool_info.get("arguments", "")
+        raw_args = tc_info.get("function").get("arguments", "")
         try:
             tool_args = json.loads(raw_args) if raw_args else {}
         except json.JSONDecodeError as error:
-            return f"Error: Invalid JSON arguments: {error}"
+            return tool_call_id, f"Error: Invalid JSON arguments: {error}"
 
         # ★工具调用前护栏★
-        checked = hook_manager.emit("on_tool_start", tool_args, tool_name)
+        checked = await hook_manager.emit("on_tool_start", tool_args, tool_name)
         if isinstance(checked, HookReject):
-            return f"Error: {str(checked)}"
+            return tool_call_id, f"Error: {str(checked)}"
 
         truncated_args = ', '.join([f"{k}={str(v).replace(chr(10), ' ')[:200]}" for k,v in tool_args.items()])
         print(f"[{agent_label}] [Tool] {tool_name}({truncated_args})")
 
         try:
             tool_impl = self.tool_registry.get(tool_name)
-            timeout = 600 if tool_impl.__name__ == 'run_subagent' else self.timeout
+            timeout = 600 if tool_name == 'run_subagent' else self.timeout
             async with self.semaphore:
-                if getattr(tool_impl, '_is_mcp', False) or tool_name == 'run_subagent':
+                if inspect.iscoroutinefunction(tool_impl):
                     response = await asyncio.wait_for(tool_impl(**tool_args), timeout=timeout)
                 else:
                     response = await asyncio.wait_for(
@@ -214,13 +215,13 @@ class ToolManager:
                     )
         except TimeoutError:
             print(f"[{agent_label}] [Result] Error: Tool '{tool_name}' execution timed out")
-            return f"Error: Tool '{tool_name}' execution timed out"
+            return tool_call_id, f"Error: Tool '{tool_name}' execution timed out"
         except Exception as e:
             print(f"[{agent_label}] [Result] Error: Tool '{tool_name}' raised an exception: {type(e).__name__}: {e}")
-            return f"Error: Tool '{tool_name}' raised an exception: {type(e).__name__}: {e}"
+            return tool_call_id, f"Error: Tool '{tool_name}' raised an exception: {type(e).__name__}: {e}"
 
         # ★工具调用后护栏★
-        response = hook_manager.emit("on_tool_end", response, tool_name)
+        response = await hook_manager.emit("on_tool_end", response, tool_name)
         print(f"[{agent_label}] [Result] {response.replace(chr(10), ' ').replace(chr(13), ' ')[:200]}")
 
         # 记录连续有多少轮tool_call没有更新todo
@@ -230,7 +231,7 @@ class ToolManager:
             # 初始为负值，只有非负时才加一，防止不需要调用 todo_write 的任务触发催更
             self.rounds_since_todo += 1
 
-        return response
+        return tool_call_id, response
 
     def generate_openai_tool_schema(self, is_sub: bool = False):
         """自动解析工具函数的 docstring 和参数注解 Annotated，生成 OpenAI 标准的 function calling schema"""

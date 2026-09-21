@@ -1,5 +1,7 @@
 import re
 import json
+import inspect
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict
@@ -16,14 +18,14 @@ SAFETY_CONFIG = {
     "sensitive_strategy": "redact",
     "allowed_tools": [],
     "tool_config": {
-        "write_file": {"sandbox_root": "D:\\NoteBooks\\Agent", "require_approval": True},
+        "write_file": {"sandbox_root": "D:\\NoteBooks\\Agent"},
     },
     "truncation_config": {
         "max_output_chars": 20480,          # 最大输出字符数
         "preserve_head_ratio": 0.7,         # 头部占截断比例
         "persist_threshold_chars": 102400   # 持久化输出阈值
     },
-    "runtime_approval": True
+    "runtime_approval": ["write_file", "edit_file"]
 }
 
 
@@ -50,6 +52,7 @@ class AgentHookManager:
         self._hooks = [
             InputSensitiveHook(config),
             ToolWhitelistHook(config),
+            HumanInLoopHook(config),
             CommandSafetyHook(config),
             OutputSensitiveHook(config),
             OutputTruncationHook(config),
@@ -60,15 +63,20 @@ class AgentHookManager:
         """允许添加自定义钩子"""
         self._hooks.append(hook)
 
-    def emit(self, event: str, *args):
+    async def emit(self, event: str, *args):
         """触发 Agent 生命周期事件（支持数据流的管道传递与链式加工），返回事件的核心数据"""
         for hook in self._hooks:
             # 依次获取所有 Hook 实例对应该事件的方法，比如 InputSensitiveHook.on_agent_start
             func = getattr(hook, event, None)
             if func is None:
                 continue
+
             # 传递 state 来实现状态共享和钩子间通信
-            result = func(self.state, *args)
+            if inspect.iscoroutinefunction(func):
+                result = await func(self.state, *args)
+            else:
+                result = func(self.state, *args)
+
             if isinstance(result, HookReject):
                 return result
             # 如果没有被钩子拦截，则用返回值来替换第一个参数，实现核心数据的链式加工
@@ -146,7 +154,6 @@ class ToolWhitelistHook:
     def __init__(self, hook_config):
         self.allowed = hook_config.get("allowed_tools", [])
         self.tool_config = hook_config.get("tool_config")
-        self.runtime_approval = hook_config.get("runtime_approval", False)
 
     def on_tool_start(self, state: dict, tool_args: dict, tool_name: str):
         state["tool_call_count"] += 1
@@ -160,12 +167,6 @@ class ToolWhitelistHook:
             if not str(Path(tool_args["path"]).resolve()).startswith(cfg.get("sandbox_root")):
                 return HookReject("路径越界")
 
-        # 高风险审批
-        if cfg.get("require_approval") and self.runtime_approval:
-            truncated_args = ', '.join([f"{k}={str(v).replace('\n', ' ')[:200]}" for k,v in tool_args.items()])
-            print(f"⚠️ 高风险操作需审批：{tool_name}({truncated_args})")
-            if input("输入 'yes(y)' 批准，其他键拒绝: ").strip().lower() not in  ('yes', 'y'):
-                return HookReject("人工审批未通过")
 
 class CommandSafetyHook:
     """危险命令拦截钩子"""
@@ -253,3 +254,23 @@ class OutputTruncationHook:
         )
 
         return ref_msg
+
+class HumanInLoopHook:
+    def __init__(self, hook_config: Dict):
+        self.approval_list = hook_config.get("runtime_approval", [])
+        # 多个审批同时到达时串行化用户输入，避免提示混在一起
+        self._approval_lock = asyncio.Lock()
+
+    async def on_tool_start(self, state: dict, tool_args: dict, tool_name: str):
+        # 高风险审批
+        if tool_name in self.approval_list:
+            truncated_args = ', '.join([f"{k}={str(v).replace('\n', ' ')[:200]}" for k,v in tool_args.items()])
+
+            print(f"⚠️ 高风险操作需审批：{tool_name}({truncated_args})")
+            prompt = "输入 'yes(y)' 批准，其他键拒绝: "
+            async with self._approval_lock:
+                # 把阻塞的 input 丢到线程池，事件循环继续跑
+                ans = await asyncio.to_thread(input, prompt)
+
+            if ans.strip().lower() not in ("yes", "y"):
+                return HookReject("人工审批未通过")
