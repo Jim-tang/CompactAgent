@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 
 from llm_client import OpenAIClient
 from common_utils import get_workspace_tree, get_messages_text
+from terminal_ui import display
 
 COMPRESSION_PROMPT = """
 You are a conversation summarization expert. Please compress the message list provided by the user into a dialogue summary written from the Assistant's perspective. The compression requirements are as follows:
@@ -150,7 +151,7 @@ class AgentContextManager:
         ]
         response = await self.llm_client.invoke(messages, temperature=0.3)
         summary = response.get("content", "").strip()
-        print("[Summary]", summary.replace('\n', ' ').replace('\r', ' ')[:200])
+        display("[Summary]", summary.replace('\n', ' ').replace('\r', ' ')[:200])
         return summary
 
     @staticmethod
@@ -244,7 +245,7 @@ class AgentContextManager:
         to_compress = self.history_messages[:split_idx]
         recent = self.history_messages[split_idx:]
 
-        print(f"⏳ 正在执行上下文压缩 (compress_msg={len(to_compress)}, keep_msg={len(recent)})")
+        display(f"⏳ 正在执行上下文压缩 (compress_msg={len(to_compress)}, keep_msg={len(recent)})")
 
         # 分割待压缩的对话轮次
         rounds = self._split_into_rounds(to_compress)

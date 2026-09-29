@@ -11,6 +11,7 @@ from typing import Literal
 from hook_manager import HookReject, AgentHookManager
 from mcp_service.mcp_client import MCPClientManager
 from common_utils import type_to_json_schema
+from terminal_ui import display
 
 def read_file(path: str, offset: int = 0, limit: int = 0) -> str:
     """Read file with optional offsets or line limits"""
@@ -135,7 +136,7 @@ def todo_write(todos: list[TodoManager.TodoItem]) -> str:
         output = TODO.update(todos)
     except ValueError as e:
         return f"Error: {e}"
-    print(f"\n\033[33m## Current Tasks\033[0m\n{output}")
+    display(f"\nCurrent Tasks\n{output}")
     return output
 
 
@@ -157,13 +158,17 @@ class ToolManager:
         for tool in func:
             name = tool.__name__
             self.tool_registry[name] = tool
-            print(f"✅ 工具 '{name}' 已注册。")
+            display(f"工具 '{name}' 已注册。")
 
     async def register_mcp_tools(self):
         """注册 MCP 工具"""
         mcp_manager = MCPClientManager("mcp_service/config.json")
-        all_tools = await mcp_manager.async_list_tools()
+        all_tools, fetch_errors = await mcp_manager.async_list_tools()
         for service_name, tools in all_tools.items():
+            if not tools:
+                display(f"MCP 服务 [{service_name}] 获取工具失败: {fetch_errors.get(service_name)}")
+                continue
+            display(f"MCP 服务 [{service_name}] 初始化成功，提供 {len(tools)} 个工具。")
             for tool in tools:
                 # 注册工具的 tool schema
                 self.mcp_tool_schemas.append({
@@ -200,7 +205,7 @@ class ToolManager:
             return tool_call_id, f"Error: {str(checked)}"
 
         truncated_args = ', '.join([f"{k}={str(v).replace(chr(10), ' ')[:200]}" for k,v in tool_args.items()])
-        print(f"[{agent_label}] [Tool] {tool_name}({truncated_args})")
+        display(f"[{agent_label}] [Tool] {tool_name}({truncated_args})")
 
         try:
             tool_impl = self.tool_registry.get(tool_name)
@@ -214,15 +219,15 @@ class ToolManager:
                         timeout=timeout
                     )
         except TimeoutError:
-            print(f"[{agent_label}] [Result] Error: Tool '{tool_name}' execution timed out")
+            display(f"[{agent_label}] [Result] Error: Tool '{tool_name}' execution timed out")
             return tool_call_id, f"Error: Tool '{tool_name}' execution timed out"
         except Exception as e:
-            print(f"[{agent_label}] [Result] Error: Tool '{tool_name}' raised an exception: {type(e).__name__}: {e}")
+            display(f"[{agent_label}] [Result] Error: Tool '{tool_name}' raised an exception: {type(e).__name__}: {e}")
             return tool_call_id, f"Error: Tool '{tool_name}' raised an exception: {type(e).__name__}: {e}"
 
         # ★工具调用后护栏★
         response = await hook_manager.emit("on_tool_end", response, tool_name)
-        print(f"[{agent_label}] [Result] {response.replace(chr(10), ' ').replace(chr(13), ' ')[:200]}")
+        display(f"[{agent_label}] [Result] {response.replace(chr(10), ' ').replace(chr(13), ' ')[:200]}")
 
         # 记录连续有多少轮tool_call没有更新todo
         if tool_name == 'todo_write':

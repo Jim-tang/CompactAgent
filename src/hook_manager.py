@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict
 
+from terminal_ui import get_ui
+
 
 # 声明式安全配置（Openclaw 风格）
 SAFETY_CONFIG = {
@@ -256,21 +258,29 @@ class OutputTruncationHook:
         return ref_msg
 
 class HumanInLoopHook:
-    def __init__(self, hook_config: Dict):
+    def __init__(self, hook_config: Dict, ui=None):
         self.approval_list = hook_config.get("runtime_approval", [])
         # 多个审批同时到达时串行化用户输入，避免提示混在一起
         self._approval_lock = asyncio.Lock()
+        self._ui = get_ui()
 
     async def on_tool_start(self, state: dict, tool_args: dict, tool_name: str):
-        # 高风险审批
         if tool_name in self.approval_list:
-            truncated_args = ', '.join([f"{k}={str(v).replace('\n', ' ')[:200]}" for k,v in tool_args.items()])
+            truncated_args = ', '.join(
+                f"{k}={str(v).replace(chr(10), ' ')[:200]}"
+                for k, v in tool_args.items()
+            )
+            prompt = (
+                f"⚠️ 高风险操作需审批：{tool_name}({truncated_args})\n"
+                f"输入 'yes(y)' 批准，其他键拒绝:"
+            )
 
-            print(f"⚠️ 高风险操作需审批：{tool_name}({truncated_args})")
-            prompt = "输入 'yes(y)' 批准，其他键拒绝: "
             async with self._approval_lock:
-                # 把阻塞的 input 丢到线程池，事件循环继续跑
-                ans = await asyncio.to_thread(input, prompt)
+                if self._ui is not None and self._ui.is_alive():
+                    ans = await self._ui.request_approval(prompt)
+                else:
+                    # headless / 无 UI 环境回退
+                    ans = await asyncio.to_thread(input, prompt + " ")
 
-            if ans.strip().lower() not in ("yes", "y"):
+            if (ans or "").strip().lower() not in ("yes", "y"):
                 return HookReject("人工审批未通过")

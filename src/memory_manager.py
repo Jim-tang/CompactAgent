@@ -19,6 +19,7 @@ from rank_bm25 import BM25Okapi
 
 from llm_client import OpenAIClient
 from common_utils import get_messages_text
+from terminal_ui import display
 
 transformers.logging.set_verbosity_error()
 
@@ -284,7 +285,7 @@ class MemoryManager:
 
         # 整合即将被遗忘的记忆
         consolidated_ids = await self._consolidate_memories(expired)
-        print("已整合 %d 条短期记忆" % len(consolidated_ids))
+        display("已整合 %d 条短期记忆" % len(consolidated_ids))
 
         # 删除过期记忆
         expired_ids = [item[0] for item in expired]
@@ -313,7 +314,7 @@ class MemoryManager:
                     items = json.loads(content)
                     return items
                 except Exception as e:
-                    print(f"❌ 处理批次 {batch_idx} 时发生错误: {e}")
+                    display(f"❌ 处理批次 {batch_idx} 时发生错误: {e}")
                     return []
 
         # 分批处理
@@ -361,7 +362,7 @@ class MemoryManager:
                 content = re.sub(r'^```(?:json)?\s*', '', content).replace("```", "")
             return json.loads(content)
         except Exception as e:
-            print(f"记录本次会话历史时发生错误: {e}\n============== content ==============\n{content}")
+            display(f"记录本次会话历史时发生错误: {e}\n============== content ==============\n{content}")
             return {}
 
     def save_session_json(self, topic: str, summary: str, timestamp: str, session_msg: list[dict]) -> None:
@@ -379,9 +380,9 @@ class MemoryManager:
             }
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(session_data, f, ensure_ascii=False, indent=2)
-            print(f"已保存会话 JSON: {filepath}")
+            display(f"已保存会话 JSON: {filepath}")
         except Exception as e:
-            print(f"⚠️ 保存会话 JSON 失败: {e}")
+            display(f"⚠️ 保存会话 JSON 失败: {e}")
 
     def update_session_md(self, topic: str, content: str, timestamp: str) -> None:
         """将新的会话条目增量追加到 Sessions.md（插入到文件开头）"""

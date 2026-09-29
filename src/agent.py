@@ -8,6 +8,7 @@ from hook_manager import AgentHookManager
 from tool_manager import ToolManager
 from memory_manager import MemoryManager
 from common_utils import subagent_exclude
+from terminal_ui import launch_ui, display
 
 
 # 全局上下文压缩配置
@@ -20,6 +21,7 @@ COMPRESSION_CONFIG = {
 }
 
 # 全局管理器实例
+ui = launch_ui()
 llm_client = OpenAIClient()
 context_manager = AgentContextManager(llm_client, COMPRESSION_CONFIG)  # 管理主Agent上下文
 memory_manager = MemoryManager(llm_client)
@@ -76,7 +78,7 @@ async def run_subagent(
 tool_manager.register(active_skill, load_skill_resource, retrieve_memory, run_subagent)
 
 async def run_agent(user_input: str, ctx_manager: AgentContextManager, max_iterations: int = 30, is_sub: bool = False, agent_label: str = "") -> str:
-    system_prompt = "You are a helpful assistant. Be concise."
+    system_prompt = "You are a helpful assistant. Be concise. Do not use emoji in your answer."
     # ★用户输入护栏★
     user_input = await hook_manager.emit("on_agent_start", user_input)
     ctx_manager.add_history({"role": "user", "content": user_input})
@@ -112,49 +114,58 @@ async def run_agent(user_input: str, ctx_manager: AgentContextManager, max_itera
     return f"Max iterations reached, summary:\n{summary}"
 
 async def main():
-    print("交互式 CLI Agent 已启动。可用命令：\n/exit 退出程序\n/reset 结束当前会话并开始新会话\n/compact 触发上下文压缩")
-    while True:
-        try:
-            user_msg = await asyncio.to_thread(input, "\nUSER: ")
-        except (EOFError, KeyboardInterrupt):
-            print("\n退出程序")
-            break
+    ui_error = ui.get_error()
+    if ui_error:
+        display(f"\n=== UI 启动失败 ===\n{ui_error}\n")
+        return
 
-        if not user_msg.strip():
+    display(
+        f"\n交互式 CLI Agent 已启动",
+        "可用命令：",
+        "  /exit   退出程序",
+        "  /reset  结束当前会话并清空输出",
+        "  /compact 触发上下文压缩\n"
+    )
+
+    while True:
+        user_msg = await asyncio.to_thread(ui.get_input, timeout=0.1)
+        if user_msg is None:
+            if not ui.is_alive():
+                break
             continue
 
-        # Command Router
+        if not user_msg:
+            continue
+
         if user_msg.startswith('/'):
-            cmd = user_msg.lower().strip()
+            cmd = user_msg.lower()
             if cmd in ('/exit', '/quit'):
+                display("\n退出程序")
+                await asyncio.sleep(2)
                 break
             elif cmd == '/reset':
-                # 记录当前会话历史
                 await memory_manager.record_session(context_manager.history_messages)
-                # 清空上下文历史，开始新会话
                 context_manager.reset_session()
-                print("🔄 会话已重置，可以开始新的对话。")
+                display("🔄 会话已重置，可以开始新的对话。")
                 continue
             elif cmd == '/compact':
-                # 主动触发上下文压缩
                 try:
                     await context_manager.compact_history()
                 except Exception as e:
-                    print(f"❌ 压缩时发生错误: {e}")
+                    display(f"❌ 压缩时发生错误: {e}")
                 continue
             else:
-                print(f"未知命令: {user_msg}，可用命令：/exit, /reset, /compact")
+                display(f"未知命令: {user_msg}，可用命令：/exit, /reset, /compact")
                 continue
 
         try:
             response = await run_agent(user_msg, context_manager, agent_label="main")
-            print(f"\nAgent: {response}")
+            display(f"\nAgent: {response}")
         except Exception as e:
-            print(f"发生错误: {e}")
+            display(f"发生错误: {e}")
 
-    # 程序退出前，记录本次会话
+    ui.request_exit()
     await memory_manager.record_session(context_manager.history_messages)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
