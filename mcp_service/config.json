@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "jina_reader": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["D:\\NoteBooks\\Agent\\mcp_service\\server\\jina_reader.py"],
+      "env": {
+        "JINA_API_KEY": "jina_bac2223fc1404f848ad902996ee98eeeBZWGIgNJECX8am3WJwhxmK3WJtPP"
+      }
+    },
+    "serper_web_search": {
+      "type": "streamable-http",
+      "url": "http://localhost:4200/demo",
+      "headers": {
+        "X-API-KEY": "4f1678fecf61760376c581d649f82b335588ed4a"
+      }
+    }
+  }
+}
