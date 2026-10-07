@@ -2,11 +2,14 @@ import os
 import json
 import asyncio
 import threading
+import time
 import httpx
 from openai import AsyncOpenAI
-from typing import List, Union, Optional
+from typing import List, Union, Optional, Literal
 from pydantic import BaseModel
 from openai.types.chat import ChatCompletion
+
+from terminal_ui import display_stream, end_stream, launch_ui, display
 
 os.environ['MODEL'] = 'MiniMax-M2.7'
 os.environ['API_KEY'] = '123'
@@ -52,13 +55,22 @@ class OpenAIClient:
         messages: List[Union[dict, BaseModel]],
         tools: Optional[List[dict]] = None,
         temperature: float = 0,
-        stream: bool = False,
+        stream_mode: Literal[None, "full", "reasoning_only"] = None,
         **kwargs,
     ) -> dict:
         """
         调用大语言模型推理接口，支持流式响应
+
+        stream_mode:
+        - None: 非流式，返回完整结果，不打印任何内容
+        - "full": 流式打印 reasoning_content 和 content
+        - "reasoning_only": 流式，只打印 reasoning_content
         """
         result = {"role": "assistant"}
+
+        if stream_mode not in ("full", "reasoning_only"):
+            stream_mode = None
+        is_streaming = stream_mode is not None
 
         async with self._semaphore:
             try:
@@ -67,44 +79,42 @@ class OpenAIClient:
                     messages=messages,
                     tools=tools,
                     temperature=temperature,
-                    stream=stream,
+                    stream=is_streaming,
                     **kwargs,
                 )
             except Exception as e:
-                print(f"❌ 调用LLM API时发生错误: {e}")
+                display(f"❌ 调用LLM API时发生错误: {e}")
                 result["content"] = str(e)
                 return result
 
-            if stream:
+            if is_streaming:
                 # 流式接口返回的是 openai.Stream 对象，其本质是将客户端底层的 HTTP 响应流封装成了一个迭代器
                 # 每一次迭代都是从这个已经建立好的响应流中读取下一个可用的数据块
                 # 如果服务端还没生成完，迭代器会阻塞等待下一个数据块到来，直到最后收到 [DONE] 标记
                 collected_content = []
                 collected_reasoning = []
-                first_reasoning = True
                 collected_tool_calls = []
                 async for chunk in response:
                     reasoning = chunk.choices[0].delta.model_extra.get("reasoning_content", "")
                     if reasoning:
-                        if first_reasoning:
-                            print(f"[思考] {reasoning}", end="", flush=True)
-                            first_reasoning = False
-                        else:
-                            print(reasoning, end="", flush=True)
+                        display_stream(reasoning, prefix="[reasoning]")
                         collected_reasoning.append(reasoning)
+
                     content = chunk.choices[0].delta.content or ""
                     if content:
-                        print(content, end="", flush=True)
-                    collected_content.append(content)
+                        if stream_mode == "full":
+                            display_stream(content)
+                        collected_content.append(content)
+
                     if chunk.choices[0].delta.tool_calls:
                         for tc in chunk.choices[0].delta.tool_calls:
                             collected_tool_calls.append(tc.model_dump())
-                print()
+                end_stream()
+
                 result["content"] = "".join(collected_content)
                 result["reasoning_content"] = "".join(collected_reasoning)
                 result["tool_calls"] = collected_tool_calls if collected_tool_calls else None
                 usage = chunk.usage
-
             else:
                 if isinstance(response, str) and response.startswith("data:"):
                     # 将SSE格式的接口响应转换为 OpenAI 格式的 ChatCompletion 对象
@@ -125,62 +135,3 @@ class OpenAIClient:
             }
 
         return result
-
-async def test_tool_calls():
-    llmClient = OpenAIClient()
-    exampleMessages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "帮我查询一下今天北京的天气，并且计算 25 * 37 等于多少"}
-    ]
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "description": "查询天气信息",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": {"type": "string", "description": "城市名称"}
-                    },
-                    "required": ["city"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "calculate",
-                "description": "计算数学表达式",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "expression": {"type": "string", "description": "数学表达式"}
-                    },
-                    "required": ["expression"]
-                }
-            }
-        }
-    ]
-    print("\n=== 测试 tool_calls 输出 ===")
-    result = await llmClient.invoke(exampleMessages, tools=tools, stream=False)
-    print("\n--- 完整模型响应 ---")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
-
-async def test_stream_invoke():
-    print("=== 测试流式对话 ===")
-    llmClient = OpenAIClient()
-    exampleMessages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "请帮我计算 165 * (43 + 10) 的结果，并展示你的计算步骤"}
-    ]
-    result = await llmClient.invoke(exampleMessages, stream=True)
-    print("\n\n--- 完整模型响应 ---")
-    print(json.dumps(result, indent=2, ensure_ascii=True))
-
-if __name__ == '__main__':
-    try:
-        asyncio.run(test_stream_invoke())
-        asyncio.run(test_tool_calls())
-    except ValueError as e:
-        print(e)

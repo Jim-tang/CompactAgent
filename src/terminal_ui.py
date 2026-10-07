@@ -58,6 +58,8 @@ def _detect_msg_type(text: str) -> str:
         return "user-input"
     if "[approval]" in t:
         return "approval"
+    if "[reasoning]" in t or "│ " in t:
+        return "dim"
     return "default"
 
 
@@ -123,6 +125,9 @@ class TerminalUI:
         self._output_area: TextArea | None = None
         self._pending_approval: asyncio.Future | None = None  # 审批模式下挂起的 Future
 
+        self._is_streaming = False  # 流式输出状态标志
+        self._stream_log_buffer = ""  # 累积流式输出写入日志
+
     def get_input(self, timeout: float | None = None) -> str | None:
         """从输入队列取一条用户输入（已 strip）；超时或无数据返回 None"""
         try:
@@ -143,6 +148,26 @@ class TerminalUI:
             self.display_queue.put_nowait(text)
         except queue.Full:
             pass
+
+    def put_stream(self, text: str, prefix: str) -> None:
+        """流式输出文本到 UI 输出区
+
+        首次调用时： is_first=True，创建新行并插入前缀
+        后续调用时： is_first=False，把 chunk 内容追加到流式行末尾
+        """
+        is_first = not self._is_streaming
+        self._is_streaming = True
+        try:
+            self.display_queue.put_nowait((is_first, text, prefix))
+        except queue.Full:
+            pass
+
+    def end_stream(self):
+        """结束流式输出，重置标志位并记录终端日志"""
+        self._is_streaming = False
+        if self._logger is not None:
+            self._logger.write(self._stream_log_buffer)
+        self._stream_log_buffer = ""
 
     def request_exit(self) -> None:
         """请求退出 UI：设置退出标志并调度 _do_exit() 关闭 Application。"""
@@ -172,9 +197,22 @@ class TerminalUI:
             except Exception:
                 pass
 
-    def _append_output(self, text: str) -> None:
-        """把多行文本追加到 _lines 缓冲；超出 MAX_LINES 时丢弃最旧的行"""
-        self._lines.extend(text.split("\n"))
+    def _append_output(self, item: str | tuple[bool, str, str]) -> None:
+        """把文本或流式内容追加到 _lines 缓冲；超出 MAX_LINES 时丢弃最旧的行"""
+        if self._is_streaming:
+            is_first, text, prefix = item
+            if prefix == "[reasoning]":
+                text = text.replace("\n", "\n│ ")
+                if is_first:
+                    text = "│ " + text
+                    self._lines.extend([prefix, text])
+                else:
+                    self._lines[-1] += text
+            else:
+                self._lines[-1] += text
+            self._stream_log_buffer += text
+        else:
+            self._lines.extend(item.split("\n"))
         if len(self._lines) > MAX_LINES:
             self._lines = self._lines[-MAX_LINES:]
 
@@ -325,7 +363,6 @@ class TerminalUI:
             return 4
         try:
             while not self._exit.is_set():
-                # 按积压量分档决定这一 tick 处理多少条
                 batch = _compute_batch(self.display_queue.qsize())
                 processed = 0
                 for _ in range(batch):
@@ -466,3 +503,19 @@ def display(*args, sep: str = "\n") -> None:
         print(text)
     else:
         ui.put_display(text)
+
+def display_stream(text: str, prefix: str = "") -> None:
+    """流式输出文本到 UI 输出区。"""
+    ui = _instance
+    if ui is None or not ui.is_alive():
+        print(text, end="", flush=True)
+    else:
+        ui.put_stream(text, prefix)
+
+def end_stream() -> None:
+    """结束流式输出"""
+    ui = _instance
+    if ui is None or not ui.is_alive():
+        return
+    else:
+        ui.end_stream()

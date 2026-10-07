@@ -88,6 +88,7 @@ async def run_agent(user_input: str, ctx_manager: AgentContextManager, max_itera
         response = await llm_client.invoke(
             messages=messages,
             tools=tool_manager.generate_openai_tool_schema(is_sub),
+            stream_mode="reasoning_only",
         )
         ctx_manager.add_history(response)
 
@@ -164,8 +165,8 @@ async def main():
         except Exception as e:
             display(f"发生错误: {e}")
 
-    ui.request_exit()
     await memory_manager.record_session(context_manager.history_messages)
+    ui.request_exit()
 
 if __name__ == "__main__":
     asyncio.run(main())
