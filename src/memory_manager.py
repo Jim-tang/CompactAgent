@@ -18,9 +18,9 @@ from FlagEmbedding import FlagReranker
 from langchain_huggingface import HuggingFaceEmbeddings
 from rank_bm25 import BM25Okapi
 
-from llm_client import OpenAIClient
-from common_utils import get_messages_text, render_prompt
-from terminal_ui import display
+from src.llm_client import OpenAIClient
+from src.common_utils import get_messages_text, render_prompt
+from src.terminal_ui import display
 
 transformers.logging.set_verbosity_error()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

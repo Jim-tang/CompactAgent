@@ -7,9 +7,9 @@ import tiktoken
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from llm_client import OpenAIClient
-from terminal_ui import display
-import common_utils as util
+from src.llm_client import OpenAIClient
+from src.terminal_ui import display
+import src.common_utils as util
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 

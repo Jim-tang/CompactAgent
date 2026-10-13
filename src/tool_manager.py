@@ -8,10 +8,10 @@ from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 from typing import Literal
 
-from hook_manager import HookReject, AgentHookManager
+from src.hook_manager import HookReject, AgentHookManager
 from mcp_service.mcp_client import MCPClientManager
-from common_utils import type_to_json_schema
-from terminal_ui import display
+from src.common_utils import type_to_json_schema
+from src.terminal_ui import display
 
 def read_file(path: str, offset: int = 0, limit: int = 0) -> str:
     """Read file with optional offsets or line limits"""

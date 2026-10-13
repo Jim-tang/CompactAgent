@@ -9,7 +9,7 @@ from typing import List, Union, Optional, Literal
 from pydantic import BaseModel
 from openai.types.chat import ChatCompletion
 
-from terminal_ui import display_stream, end_stream, launch_ui, display
+from src.terminal_ui import display_stream, end_stream, launch_ui, display
 
 os.environ['MODEL'] = 'MiniMax-M2.7'
 os.environ['API_KEY'] = '123'
