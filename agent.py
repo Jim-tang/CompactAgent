@@ -2,13 +2,13 @@ import asyncio
 from typing import Annotated
 from pydantic import Field
 
-from llm_client import OpenAIClient
-from context_manager import AgentContextManager
-from hook_manager import AgentHookManager
-from tool_manager import ToolManager
-from memory_manager import MemoryManager
-from common_utils import subagent_exclude
-from terminal_ui import launch_ui, display
+from src.llm_client import OpenAIClient
+from src.context_manager import AgentContextManager
+from src.hook_manager import AgentHookManager
+from src.tool_manager import ToolManager
+from src.memory_manager import MemoryManager
+from src.common_utils import subagent_exclude
+from src.terminal_ui import launch_ui, display
 
 
 # 全局上下文压缩配置
@@ -78,13 +78,12 @@ async def run_subagent(
 tool_manager.register(active_skill, load_skill_resource, retrieve_memory, run_subagent)
 
 async def run_agent(user_input: str, ctx_manager: AgentContextManager, max_iterations: int = 30, is_sub: bool = False, agent_label: str = "") -> str:
-    system_prompt = "You are a helpful assistant. Be concise. Do not use emoji in your answer."
     # ★用户输入护栏★
     user_input = await hook_manager.emit("on_agent_start", user_input)
     ctx_manager.add_history({"role": "user", "content": user_input})
 
     for _ in range(max_iterations):
-        messages = await ctx_manager.prepare_message(system_prompt)
+        messages = await ctx_manager.prepare_message()
         response = await llm_client.invoke(
             messages=messages,
             tools=tool_manager.generate_openai_tool_schema(is_sub),
@@ -106,9 +105,9 @@ async def run_agent(user_input: str, ctx_manager: AgentContextManager, max_itera
         else:
             return await hook_manager.emit("on_agent_end", response.get("content"))
 
-        # 催更机制（Nag Reminer）：连续 5 轮没有调用 todo_write 的话自动注入提醒
+        # 催更机制（System Reminer）：连续 5 轮没有调用 todo_write 的话自动注入提醒
         if tool_manager.rounds_since_todo >= 5:
-            ctx_manager.add_history({"role": "system", "content": "<reminder>Update your todos.</reminder>"})
+            ctx_manager.add_history({"role": "system", "content": "<system-reminder>Update your todos.</system-reminder>"})
 
     # 超出循环上限时返回对话历史的梗概
     summary = await ctx_manager.summarize_with_llm(ctx_manager.history_messages)

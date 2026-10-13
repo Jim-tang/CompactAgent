@@ -8,6 +8,7 @@ import numpy as np
 import asyncio
 import threading
 import transformers
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
@@ -18,49 +19,12 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from rank_bm25 import BM25Okapi
 
 from llm_client import OpenAIClient
-from common_utils import get_messages_text
+from common_utils import get_messages_text, render_prompt
 from terminal_ui import display
 
 transformers.logging.set_verbosity_error()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-CONSOLIDATE_PROMPT = """
-以下是一个包含若干条近期会话记录的列表，请逐条分析每条记录的重要性（0.0 ~ 1.0 分），然后将其概括为语义简洁、自包含的长期记忆，务必保留关键信息。
-
----
-{memories_text}
----
-
-请严格按照以下 JSON 格式输出，返回一个 JSON 数组，每个元素对应一条记忆，顺序与输入一致：
-[
-  {{
-    "importance_score": <重要性分数>,
-    "summary": "<记忆摘要>"
-  }},
-  ...
-]
-"""
-
-RECORD_SESSION_PROMPT = """
-请仔细阅读下面用户与 Agent 之间的完整对话历史，从中提炼会话主题并概括会话内容，最后以 JSON 字符串形式输出
-
----
-### 对话历史
-{conversation_history}
----
-
-输出格式要求：
-{{
-  "topic": <会话主题>（不超过 40 字）"
-  "content": <会话内容>（不超过 500 字）
-}}
-
-概括会话内容时注意语义连贯，言简意赅，保持客观准确，避免冗余细节，需要包含以下关键信息：
-- 用户的核心请求或任务目标
-- Assistant 调用的所有工具名称、关键参数
-- 工具调用的返回结果中的重要数据
-- Assistant 据此做出的决策、推理或最终回答
-- 任何遇到的问题、异常或需要用户澄清的内容
-"""
 
 class LocalEmbeddings:
     def __init__(self, model_name='BAAI/bge-m3'):
@@ -299,12 +263,16 @@ class MemoryManager:
     async def _consolidate_memories(self, memories: List[Tuple], batch_size: int = 10, max_concurrent: int = 5) -> List[str]:
         """异步整合记忆，每个元素包含（id,记忆文本,元数据），将重要的转为长期记忆"""
         semaphore = asyncio.Semaphore(max_concurrent)  # 控制并发数
+        prompt_template = PROJECT_ROOT / "template" / "memory_consolidate.md"
+        with open(prompt_template, 'r', encoding='utf-8') as f:
+            template = f.read()
+
         async def process_batch(batch, batch_idx):
             async with semaphore:
                 memories_text = "\n---\n".join(f"### 记忆 {idx+1} ###\n{item[1]}" for idx, item in enumerate(batch))
                 messages = [
                     {"role": "system", "content": "你是一个记忆管理与评估专家，负责一个 Agent 系统的记忆模块，该模块具备将短期的会话记忆评估后整合为长期记忆的功能。"},
-                    {"role": "user", "content": CONSOLIDATE_PROMPT.format(memories_text=memories_text)},
+                    {"role": "user", "content": render_prompt(template, {"memories_text": memories_text})},
                 ]
                 try:
                     response = await self.llm_client.invoke(messages)
@@ -351,9 +319,12 @@ class MemoryManager:
         return topic
 
     async def extract_session(self, history_text: str):
+        prompt_template = PROJECT_ROOT / "template" / "session_record.md"
+        with open(prompt_template, 'r', encoding='utf-8') as f:
+            template = f.read()
         messages = [
             {"role": "system", "content": "你是一个会话分析与记忆提取专家。"},
-            {"role": "user", "content": RECORD_SESSION_PROMPT.format(conversation_history=history_text)},
+            {"role": "user", "content": render_prompt(template, {"conversation_history": history_text})},
         ]
         try:
             response = await self.llm_client.invoke(messages)

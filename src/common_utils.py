@@ -1,7 +1,12 @@
 import re
 import os
+import platform
 from typing import Optional, Literal, get_origin, get_args, List
 from pydantic import BaseModel
+from datetime import datetime, timezone
+from pathlib import Path
+from string import Template
+
 
 def subagent_exclude(func):
     """
@@ -125,6 +130,29 @@ def get_messages_text(messages: List[dict]) -> str:
     return messages_text
 
 
-if __name__ == "__main__":
-    workspace_tree = get_workspace_tree(os.getcwd(), excludes=["mcp_service", "skills", "chroma_db"])
-    print(workspace_tree)
+def collect_runtime() -> dict[str, str]:
+    """收集跨平台运行时环境信息，所有值均为字符串，可直接用于模板替换。"""
+    cwd = Path.cwd()
+    return {
+        "working_directory": str(cwd),
+        "is_git_repo": str((cwd / ".git").exists()).lower(),
+        "platform": platform.system().lower(),
+        "os_version": platform.version(),
+        "current_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "python_version": platform.python_version(),
+    }
+
+def render_prompt(template: str, variables: dict[str, str], max_depth: int = 3) -> str:
+    """渲染提示词模板：先校验占位符，再递归替换，返回最终字符串。"""
+    required = set(re.findall(r"\$\{(\w+)\}", template))
+    missing = required - set(variables)
+    if missing:
+        raise ValueError(f"Missing required variables: {sorted(missing)}")
+
+    result = template
+    for _ in range(max_depth):
+        prev = result
+        result = Template(result).safe_substitute(variables)
+        if result == prev:
+            break
+    return result

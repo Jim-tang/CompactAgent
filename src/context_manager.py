@@ -8,23 +8,10 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from llm_client import OpenAIClient
-from common_utils import get_workspace_tree, get_messages_text
 from terminal_ui import display
+import common_utils as util
 
-COMPRESSION_PROMPT = """
-You are a conversation summarization expert. Please compress the message list provided by the user into a dialogue summary written from the Assistant's perspective. The compression requirements are as follows:
-
-1. **Perspective**: Use the first-person perspective of the Assistant. Describe what request you (the Assistant) received in the conversation, what actions you performed, what results you obtained, and what judgments you made.
-
-2. **Concise and to the point**: Remove repetitions, pleasantries, or irrelevant details. Extract the following key information:
-   - The user's core request or task objective
-   - All tool names and key parameters invoked by the Assistant
-   - Important data from tool call return results
-   - Decisions, reasoning, or final responses made by the Assistant based on the above
-   - Any problems encountered, exceptions, or content requiring clarification from the user
-
-3. **Length**: Keep within 150 words. If there are many dialogue turns or key pieces of information, the length may be appropriately increased but should not exceed 300 words.
-"""
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class AgentContextManager:
@@ -34,25 +21,25 @@ class AgentContextManager:
     管理 Agent 对话历史和 Skill 的渐进式披露
     支持根据 token 阈值或消息数量自动压缩历史，避免超出上下文窗口限制
     """
-    def __init__(self, llm_client: OpenAIClient, compress_config: Optional[Dict] = None, skills_root: str = "skills"):
-        self.llm_client = llm_client            # 用于生成摘要的 OpenAIClient 客户端
-        self.compress_config = compress_config  # 上下文压缩配置字典
-        self.skills_root = Path(skills_root)    # 技能文件夹根路径
-        self.metadata_cache = {}                # 存储所有技能元数据的字典
-        self.active_instructions = {}           # 存储当前已激活技能的完整指令的字典
-        self.loaded_resources = {}              # 存储已加载的技能资源文件的字典
-        self.history_messages = []              # 历史对话（不含 system）放到管理器内部维护
+    def __init__(self, llm_client: OpenAIClient, compress_config: Optional[Dict] = None):
+        self.llm_client = llm_client                       # 用于生成摘要的 OpenAIClient 客户端
+        self.compress_config = compress_config             # 上下文压缩配置字典
+        self.metadata_cache = {}                           # 存储所有技能元数据的字典
+        self.active_instructions = {}                      # 存储当前已激活技能的完整指令的字典
+        self.loaded_resources = {}                         # 存储已加载的技能资源文件的字典
+        self.history_messages = []                         # 历史对话（不含 system）放到管理器内部维护
         self._load_all_metadata()
 
     def _load_all_metadata(self):
         """
         第一层：启动时加载所有技能的元数据（仅 name + description）
 
-        遍历 skills_root 下的每个子目录，读取 SKILL.md 文件并解析 YAML 头，提取 name 和 description
+        遍历 skills 下的每个子目录，读取 SKILL.md 文件并解析 YAML 头，提取 name 和 description
         """
-        if not self.skills_root.exists():
+        skills_root = PROJECT_ROOT / "skills"
+        if not skills_root.exists():
             return
-        for skill_dir in self.skills_root.iterdir():
+        for skill_dir in skills_root.iterdir():
             if not skill_dir.is_dir():
                 continue
             skill_md = skill_dir / "SKILL.md"
@@ -75,8 +62,14 @@ class AgentContextManager:
         """往管理器维护的历史对话列表中追加新的消息"""
         self.history_messages.append(message)
 
-    async def prepare_message(self, system_prompt: str):
-        """上下文处理的核心方法：先扩展 -> 后压缩，然后拼接历史记录返回完整消息列表"""
+    async def prepare_message(self):
+        """上下文处理的核心方法：渲染模板 -> 动态扩展 -> 压缩，然后拼接历史记录返回完整消息列表"""
+        prompt_template = PROJECT_ROOT / "template" / "system_prompt.md"
+        with open(prompt_template, 'r', encoding='utf-8') as f:
+            content = f.read()
+        runtime_info = util.collect_runtime()
+        # 将运行时信息渲染至系统提示的模板
+        system_prompt = util.render_prompt(content, runtime_info)
         # 动态扩展系统提示（渐进式披露）
         extended_system_msg = self.extend_system_prompt(system_prompt)
         full_messages = extended_system_msg + self.history_messages
@@ -110,7 +103,7 @@ class AgentContextManager:
         active_ext = self.get_active_context_extension()
         if active_ext:
             extended_content += "\n" + active_ext
-        ws_tree = get_workspace_tree(os.getcwd(), excludes=["mcp_service", "skills", "chroma_db"])
+        ws_tree = util.get_workspace_tree(os.getcwd(), excludes=["mcp_service", "skills", "chroma_db"])
         extended_content += f"\n[Workspace Tree] (depth=3):\n{ws_tree}"
         system_message = [{"role": "system", "content": extended_content}]
         return system_message
@@ -145,9 +138,12 @@ class AgentContextManager:
 
     async def summarize_with_llm(self, history_msg: list[dict]) -> str:
         """调用 LLM 接口生成历史对话的摘要"""
+        prompt_template = PROJECT_ROOT / "template" / "context_compression.md"
+        with open(prompt_template, 'r', encoding='utf-8') as f:
+            compression_prompt = f.read()
         messages = [
-            {"role": "system", "content": COMPRESSION_PROMPT},
-            {"role": "user", "content": get_messages_text(history_msg)},
+            {"role": "system", "content": compression_prompt},
+            {"role": "user", "content": util.get_messages_text(history_msg)},
         ]
         response = await self.llm_client.invoke(messages, temperature=0.3)
         summary = response.get("content", "").strip()
