@@ -11,10 +11,6 @@ from openai.types.chat import ChatCompletion
 
 from src.terminal_ui import display_stream, end_stream, launch_ui, display
 
-os.environ['MODEL'] = 'MiniMax-M2.7'
-os.environ['API_KEY'] = '123'
-os.environ['BASE_URL'] = 'http://127.0.0.1:8080/v1'
-
 
 class OpenAIClient:
     """
@@ -30,17 +26,20 @@ class OpenAIClient:
                 cls._instances[cls] = super().__new__(cls)
         return cls._instances[cls]
 
-    def __init__(self, model: str = "", api_key: str = "", base_url: str = "", max_concurrency: int = 3):
-        # 防止单例重复初始化
+    def __init__(self, config: dict = None, model: str = None, api_key: str = None, base_url: str = None, max_concurrency: int = 3):
         if getattr(self, "_initialized", False):
             return
         self._initialized = True
         
-        self.model = model or os.getenv("MODEL")
-        api_key = api_key or os.getenv("API_KEY")
-        base_url = base_url or os.getenv("BASE_URL")
+        if config is None:
+            config = {}
+        
+        self.model = model if model is not None else config.get("model") or os.getenv("MODEL")
+        api_key = api_key if api_key is not None else config.get("api_key") or os.getenv("API_KEY")
+        base_url = base_url if base_url is not None else config.get("base_url") or os.getenv("BASE_URL")
+
         if not all([self.model, api_key, base_url]):
-            raise ValueError("模型ID、API密钥和服务地址必须被提供或在.env文件中定义。")
+            raise ValueError("模型ID、API密钥和服务地址必须被提供。")
 
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self.client = AsyncOpenAI(

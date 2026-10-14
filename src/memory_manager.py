@@ -86,17 +86,14 @@ class MemoryManager:
     - 整合：使用 LLM 评估短期记忆重要性，重要者改写后存入长期。
     """
 
-    def __init__(
-        self,
-        llm_client: OpenAIClient,
-        persist_directory: str = "./chroma_db",
-        embedding_model: str = "BAAI/bge-m3",
-        session_ttl_seconds: int = 3600,         # 短期记忆存活时间（秒）
-        retrieve_threshold: float = 0.25,           # 混合检索的重排筛选阈值
-        importance_threshold: float = 0.6,          # 重要性阈值（0~1），高于此值才转为长期记忆
-        hybrid_weights: Tuple[float, float] = (0.6, 0.4),  # (语义权重, BM25权重)
-    ):
+    def __init__(self, llm_client: OpenAIClient, config: dict = None):
         self.llm_client = llm_client
+        persist_directory = config.get("persist_directory", "./chroma_db")
+        embedding_model = config.get("embedding_model", "BAAI/bge-m3")
+        session_ttl_seconds = config.get("session_ttl_seconds", 3600)
+        retrieve_threshold = config.get("retrieve_threshold", 0.25)
+        importance_threshold = config.get("importance_threshold", 0.6)
+        hybrid_weights = tuple(config.get("hybrid_weights", [0.6, 0.4]))
 
         # 嵌入模型（本地部署）
         embeddings = LocalEmbeddings(embedding_model)

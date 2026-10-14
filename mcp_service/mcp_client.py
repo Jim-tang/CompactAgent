@@ -60,22 +60,27 @@ class MCPClientManager:
     """
     MCP 多服务管理器：并发管理配置文件中的所有服务
     """
-    def __init__(self, config_path: str = "config.json"):
-        self.config_path = config_path
+    def __init__(self, config: dict = None, config_path: str = None):
         self.clients: Dict[str, MCPClient] = {}
-        self._load_config()
+        if config is not None:
+            self._load_from_dict(config)
+        else:
+            self._load_config(config_path)
 
-    def _load_config(self):
-        """加载配置文件并初始化所有客户端实例"""
-        if not os.path.exists(self.config_path):
-            raise FileNotFoundError(f"配置文件未找到: {self.config_path}")
-
-        with open(self.config_path, "r", encoding="utf-8") as f:
-            config_data = json.load(f)
-
-        mcp_servers = config_data.get("mcpServers", {})
+    def _load_from_dict(self, config_data: dict):
+        mcp_servers = config_data.get("servers", {})
         for name, config in mcp_servers.items():
             self.clients[name] = MCPClient(name, config)
+
+    def _load_config(self, config_path: str):
+        """加载配置文件并初始化所有客户端实例"""
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"配置文件未找到: {config_path}")
+
+        with open(config_path, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
+
+        self._load_from_dict(config_data)
 
     async def async_list_tools(self) -> tuple[Dict[str, list], Dict[str, str]]:
         """

@@ -142,14 +142,14 @@ def todo_write(todos: list[TodoManager.TodoItem]) -> str:
 
 class ToolManager:
     """管理工具的注册与执行"""
-    def __init__(self, timeout: int = 30, max_concurrency: int = 3):
+    def __init__(self, timeout: int = 30, max_concurrency: int = 3, mcp_config: dict = None):
         """初始化时注册基本工具"""
         self.timeout = timeout
         self.max_concurrency = max_concurrency
         self.semaphore = asyncio.Semaphore(max_concurrency)
         self.tool_registry = {}
         self.mcp_tool_schemas = []
-        asyncio.run(self.register_mcp_tools())
+        asyncio.run(self.register_mcp_tools(mcp_config))
         self.register(read_file, write_file, edit_file, bash, todo_write)
         self.rounds_since_todo = -1  # todo reminder 计数器
 
@@ -160,9 +160,13 @@ class ToolManager:
             self.tool_registry[name] = tool
             display(f"工具 '{name}' 已注册。")
 
-    async def register_mcp_tools(self):
+    async def register_mcp_tools(self, config: dict = None):
         """注册 MCP 工具"""
-        mcp_manager = MCPClientManager("mcp_service/config.json")
+        if config:
+            mcp_manager = MCPClientManager(config)
+        else:
+            mcp_manager = MCPClientManager(config_path="mcp_service/config.json")
+
         all_tools, fetch_errors = await mcp_manager.async_list_tools()
         for service_name, tools in all_tools.items():
             if not tools:

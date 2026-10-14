@@ -9,26 +9,6 @@ from typing import List, Dict
 from src.terminal_ui import get_ui
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# 声明式安全配置（Openclaw 风格）
-HOOK_CONFIG = {
-    "input_blacklist": ["忽略之前的所有指令", "ignore previous instructions"],
-    "output_blacklist": [
-        r"sk-[-A-Za-z0-9]+",
-        r"AKIA[0-9A-Z]{16}",
-        r"-----BEGIN RSA PRIVATE KEY-----"
-    ],
-    "sensitive_strategy": "redact",
-    "allowed_tools": [],
-    "tool_config": {
-        "write_file": {"sandbox_root": "D:\\NoteBooks\\Agent"},
-    },
-    "truncation_config": {
-        "max_output_chars": 20480,          # 最大输出字符数
-        "preserve_head_ratio": 0.7,         # 头部占截断比例
-    },
-    "temp_dir": ".temp/",
-    "runtime_approval": ["write_file", "edit_file"]
-}
 
 
 class HookReject:
@@ -50,9 +30,7 @@ class AgentHookManager:
     """
     微内核 Hook 管理器，一个简化的 Hook 基础设施。
     """
-    def __init__(self, config: Dict = None):
-        if not config:
-            config = HOOK_CONFIG
+    def __init__(self, config: Dict):
         """注册基础钩子"""
         self._hooks = [
             InputSensitiveHook(config),
