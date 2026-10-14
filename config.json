@@ -1,0 +1,60 @@
+{
+  "compression": {
+    "mode": "message_count",
+    "threshold": 30,
+    "max_context_length": 64000,
+    "reserved_tokens": 8000,
+    "keep_recent": 6
+  },
+  "hooks": {
+    "input_blacklist": ["忽略之前的所有指令", "ignore previous instructions"],
+    "output_blacklist": [
+      "sk-[-A-Za-z0-9]+",
+      "AKIA[0-9A-Z]{16}",
+      "-----BEGIN RSA PRIVATE KEY-----"
+    ],
+    "sensitive_strategy": "redact",
+    "allowed_tools": [],
+    "tool_config": {
+      "write_file": {"sandbox_root": "D:\\NoteBooks\\Agent"}
+    },
+    "truncation_config": {
+      "max_output_chars": 20480,
+      "preserve_head_ratio": 0.7
+    },
+    "temp_dir": ".temp/",
+    "runtime_approval": ["write_file", "edit_file"]
+  },
+  "llm": {
+    "model": "MiniMax-M2.7",
+    "api_key": "123",
+    "base_url": "http://127.0.0.1:8080/v1"
+  },
+  "memory": {
+    "persist_directory": "./chroma_db",
+    "embedding_model": "BAAI/bge-m3",
+    "session_ttl_seconds": 3600,
+    "retrieve_threshold": 0.25,
+    "importance_threshold": 0.6,
+    "hybrid_weights": [0.6, 0.4]
+  },
+  "mcp": {
+    "servers": {
+      "jina_reader": {
+        "type": "stdio",
+        "command": "python",
+        "args": ["D:\\NoteBooks\\Agent\\mcp_service\\server\\jina_reader.py"],
+        "env": {
+          "JINA_API_KEY": "jina_88c3c63fcb7944c5b5e1e8061e7e80ed-7O0Fgps3Ow_h7vEHsLSlgTS1zcI"
+        }
+      },
+      "serper_web_search": {
+        "type": "streamable-http",
+        "url": "http://localhost:4200/demo",
+        "headers": {
+          "X-API-KEY": "4f1678fecf61760376c581d649f82b335588ed4a"
+        }
+      }
+    }
+  }
+}

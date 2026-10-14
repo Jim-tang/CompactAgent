@@ -1,4 +1,6 @@
 import asyncio
+import json
+from pathlib import Path
 from typing import Annotated
 from pydantic import Field
 
@@ -11,22 +13,16 @@ from src.common_utils import subagent_exclude
 from src.terminal_ui import launch_ui, display
 
 
-# 全局上下文压缩配置
-COMPRESSION_CONFIG = {
-    "mode": "message_count",  # message_count 或 token_ratio
-    "threshold": 30,  # 触发压缩的阈值（消息数或比例0~1）
-    "max_context_length": 64000,  # token_ratio 模式的最大上下文窗口
-    "reserved_tokens": 8000,  # token_ratio 模式为 Tool Schema 预留的空间
-    "keep_recent": 6,  # 压缩时保留最近的消息条数
-}
+PROJECT_ROOT = Path(__file__).resolve().parent
+with open(PROJECT_ROOT / "config.json", "r", encoding="utf-8") as f:
+    CONFIG = json.load(f)
 
-# 全局管理器实例
 ui = launch_ui()
-llm_client = OpenAIClient()
-context_manager = AgentContextManager(llm_client, COMPRESSION_CONFIG)  # 管理主Agent上下文
-memory_manager = MemoryManager(llm_client)
-hook_manager = AgentHookManager()
-tool_manager = ToolManager()
+llm_client = OpenAIClient(config=CONFIG.get("llm", {}))
+context_manager = AgentContextManager(llm_client, CONFIG.get("compression", {}))
+memory_manager = MemoryManager(llm_client, config=CONFIG.get("memory", {}))
+hook_manager = AgentHookManager(config=CONFIG.get("hooks", {}))
+tool_manager = ToolManager(mcp_config=CONFIG.get("mcp"))
 
 
 @subagent_exclude
@@ -68,7 +64,7 @@ async def run_subagent(
 ) -> str:
     """Run a subagent with fresh conversation context and one matched skill (if necessary), then return its final response."""
     # 子Agent独立的上下文管理器
-    sub_ctx_manager = AgentContextManager(llm_client, COMPRESSION_CONFIG)
+    sub_ctx_manager = AgentContextManager(llm_client, CONFIG.get("compression", {}))
     if skill:
         # 子Agent不做渐进式加载，而是直接激活最多一个与任务相关的 Skill
         sub_ctx_manager.activate_skill(skill)
@@ -160,7 +156,7 @@ async def main():
 
         try:
             response = await run_agent(user_msg, context_manager, agent_label="main")
-            display(f"\nAgent: {response}")
+            display(response)
         except Exception as e:
             display(f"发生错误: {e}")
 
