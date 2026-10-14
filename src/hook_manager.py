@@ -8,9 +8,9 @@ from typing import List, Dict
 
 from src.terminal_ui import get_ui
 
-
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # 声明式安全配置（Openclaw 风格）
-SAFETY_CONFIG = {
+HOOK_CONFIG = {
     "input_blacklist": ["忽略之前的所有指令", "ignore previous instructions"],
     "output_blacklist": [
         r"sk-[-A-Za-z0-9]+",
@@ -25,8 +25,8 @@ SAFETY_CONFIG = {
     "truncation_config": {
         "max_output_chars": 20480,          # 最大输出字符数
         "preserve_head_ratio": 0.7,         # 头部占截断比例
-        "persist_threshold_chars": 102400   # 持久化输出阈值
     },
+    "temp_dir": ".temp/",
     "runtime_approval": ["write_file", "edit_file"]
 }
 
@@ -45,11 +45,14 @@ class HookReject:
     def __str__(self):
         return f"[HookReject] {self.reason}"
 
+
 class AgentHookManager:
     """
     微内核 Hook 管理器，一个简化的 Hook 基础设施。
     """
-    def __init__(self, config: Dict = SAFETY_CONFIG):
+    def __init__(self, config: Dict = None):
+        if not config:
+            config = HOOK_CONFIG
         """注册基础钩子"""
         self._hooks = [
             InputSensitiveHook(config),
@@ -58,6 +61,7 @@ class AgentHookManager:
             CommandSafetyHook(config),
             OutputSensitiveHook(config),
             OutputTruncationHook(config),
+            SessionCleanupHook(config),
         ]
         self.state = {"tool_call_count": 0}  # 共享状态
 
@@ -81,10 +85,10 @@ class AgentHookManager:
 
             if isinstance(result, HookReject):
                 return result
-            # 如果没有被钩子拦截，则用返回值来替换第一个参数，实现核心数据的链式加工
-            if result is not None:
-                args = (result,) + args[1:] if len(args) > 1 else (result,)
-        return args[0]
+            if result is not None and len(args) > 0:
+                args = (result,) + args[1:]
+
+        return args[0] if len(args) > 0 else None
 
 
 class IOSensitiveBase:
@@ -210,7 +214,7 @@ class OutputTruncationHook:
         config = hook_config.get("truncation_config", {})
         self.max_output_chars = config.get("max_output_chars", 8000)
         self.head_ratio = config.get("head_ratio", 0.7)
-        self.persist_threshold_chars = config.get("persist_threshold_chars", self.max_output_chars * 10)
+        self.temp_dir = hook_config.get("temp_dir", ".temp/")
 
     def on_tool_end(self, state: dict, tool_output: str, tool_name: str) -> str:
         """工具执行后，检查并截断输出"""
@@ -218,44 +222,34 @@ class OutputTruncationHook:
         if output_len <= self.max_output_chars:
             return tool_output
 
-        truncated = self._truncate_output(tool_output)
-        if output_len >= self.persist_threshold_chars:
-            ref_msg = self._persist_large_output(tool_name, tool_output)
-            truncated += ref_msg
+        head, tail = self._truncate_output(tool_output)
+        file_path = self._persist_large_output(tool_name, tool_output)
 
-        return truncated
+        # 输出截断后插入可读提示
+        truncated_msg = (
+            f"[LargeOutputTruncated] Tool '{tool_name}' output size: {len(tool_output)} chars, limited_to={self.max_output_chars} chars\n"
+            f"Output persisted to: {file_path}, You can inspect it using `read_file` tool with `offset` and `limit` parameter\n"
+            f"Truncated Content:\n{head}\n\n[... {output_len - self.max_output_chars} characters omitted ...]\n\n{tail}"
+        )
+        return truncated_msg
 
-    def _truncate_output(self, tool_output: str) -> str:
+    def _truncate_output(self, tool_output: str) -> tuple:
         """超过 max_chars 则保留 head 和 tail，中间替换为截断说明"""
-        output_len = len(tool_output)
-        # 计算头尾长度
         head_len = int(self.max_output_chars * self.head_ratio)
         tail_len = self.max_output_chars - head_len
-
         head = tool_output[:head_len]
         tail = tool_output[-tail_len:]
-        # 输出截断后插入可读提示 (OpenCode风格)
-        truncated = (
-            f"[Truncated|original_size={output_len} chars, limited_to={self.max_output_chars} chars]\n"
-            f"{head}\n\n[... {output_len - self.max_output_chars} characters omitted ...]\n\n{tail}"
-        )
-        return truncated
+        return head, tail
 
     def _persist_large_output(self, tool_name: str, tool_output: str) -> str:
         """超大输出持久化为文件并返回引用"""
+        temp_path = PROJECT_ROOT / self.temp_dir
+        temp_path.mkdir(parents=True, exist_ok=True)
         filename = f"{tool_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        file_path = Path.cwd() / filename
-
+        file_path = temp_path / filename
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(tool_output)
-
-        ref_msg = (
-            f"\n[LargeOutputStored] Tool '{tool_name}' output size: {len(tool_output)} chars\n"
-            f"Output persisted to: {file_path}\n"
-            f"You can inspect it using: read_file('{file_path}', offset=0, limit=2000)"
-        )
-
-        return ref_msg
+        return str(file_path)
 
 class HumanInLoopHook:
     def __init__(self, hook_config: Dict, ui=None):
@@ -284,3 +278,15 @@ class HumanInLoopHook:
 
             if (ans or "").strip().lower() not in ("yes", "y"):
                 return HookReject("人工审批未通过")
+
+
+class SessionCleanupHook:
+    """会话结束清理钩子，清理临时目录"""
+    def __init__(self, hook_config: Dict):
+        self.temp_dir = hook_config.get("temp_dir", ".temp/")
+
+    def on_session_end(self, state: dict):
+        temp_path = PROJECT_ROOT / self.temp_dir
+        if temp_path.exists() and temp_path.is_dir():
+            import shutil
+            shutil.rmtree(temp_path)

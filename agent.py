@@ -140,13 +140,13 @@ async def main():
         if user_msg.startswith('/'):
             cmd = user_msg.lower()
             if cmd in ('/exit', '/quit'):
-                display("\n退出程序")
+                display("\n📦 会话结束，正在清理临时文件并归档会话历史")
                 await asyncio.sleep(2)
                 break
             elif cmd == '/reset':
                 await memory_manager.record_session(context_manager.history_messages)
                 context_manager.reset_session()
-                display("🔄 会话已重置，可以开始新的对话。")
+                display("\n🔄 会话已重置，可以开始新的对话。")
                 continue
             elif cmd == '/compact':
                 try:
@@ -165,6 +165,9 @@ async def main():
             display(f"发生错误: {e}")
 
     await memory_manager.record_session(context_manager.history_messages)
+
+    # ★会话结束护栏★
+    await hook_manager.emit("on_session_end")
     ui.request_exit()
 
 if __name__ == "__main__":
