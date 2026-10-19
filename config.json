@@ -23,7 +23,7 @@
       "preserve_head_ratio": 0.7
     },
     "temp_dir": ".temp/",
-    "runtime_approval": ["write_file", "edit_file"]
+    "runtime_approval": ["file_write", "file_edit"]
   },
   "llm": {
     "model": "MiniMax-M2.7",

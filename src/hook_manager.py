@@ -205,7 +205,7 @@ class OutputTruncationHook:
         # 输出截断后插入可读提示
         truncated_msg = (
             f"[LargeOutputTruncated] Tool '{tool_name}' output size: {len(tool_output)} chars, limited_to={self.max_output_chars} chars\n"
-            f"Output persisted to: {file_path}, You can inspect it using `read_file` tool with `offset` and `limit` parameter\n"
+            f"Output persisted to: {file_path}, You can inspect it using file_read tool with `offset` and `limit` parameter\n"
             f"Truncated Content:\n{head}\n\n[... {output_len - self.max_output_chars} characters omitted ...]\n\n{tail}"
         )
         return truncated_msg
