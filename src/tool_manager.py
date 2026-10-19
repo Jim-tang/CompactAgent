@@ -1,72 +1,59 @@
+import os
+import signal
 import inspect
 import json
-import subprocess
 import functools
 import asyncio
-from typing import Callable, Annotated, get_type_hints, get_origin, get_args
-from pydantic import BaseModel
+from typing import Literal, Callable, Annotated, get_type_hints, get_origin, get_args
+from pydantic import BaseModel, Field
 from pydantic.fields import FieldInfo
-from typing import Literal
 
-from src.hook_manager import HookReject, AgentHookManager
 from mcp_service.mcp_client import MCPClientManager
-from src.common_utils import type_to_json_schema
+from src.hook_manager import HookReject, AgentHookManager
 from src.terminal_ui import display
+from src.file_tools import file_toolset
+import src.common_utils as util
 
-def read_file(path: str, offset: int = 0, limit: int = 0) -> str:
-    """Read file with optional offsets or line limits"""
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        start = offset if offset else 0
-        end = start + limit if limit else len(lines)
-        numbered = [f"{i+1:4d} {line}" for i, line in enumerate(lines[start:end], start)]
-        return ''.join(numbered)
-    except Exception as e:
-        return f"Error: {str(e)}"
 
-def write_file(path: str, content: str) -> str:
-    """Write content to file"""
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(content)
-        return f"Successfully wrote to {path}"
-    except Exception as e:
-        return f"Error: {str(e)}"
 
-def edit_file(path: str, old_string: str, new_string: str) -> str:
-    """Replace a unique string in file"""
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        if content.count(old_string) != 1:
-            return f"Error: old_string must appear exactly once (found {content.count(old_string)})"
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(content.replace(old_string, new_string))
-        return f"Successfully edited {path}"
-    except Exception as e:
-        return f"Error: {str(e)}"
+async def bash(
+    command: Annotated[str, Field(description="The command to execute")],
+    timeout: Annotated[int, Field(description="Optional timeout in seconds", default=30, ge=5, le=300)]
+) -> str:
+    """Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.
 
-def bash(command: str) -> str:
-    """Run shell command"""
-    result = ""
+    Usage notes:
+    - The command argument is required.
+    - Capture the output of the command.
+    - Always quote file paths that contain spaces with double quotes.
+    - You can specify an optional timeout in seconds (up to 300s / 5 min). If not specified, commands will time out after 30s.
+    - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
+    - If the output exceeds 20480 characters, output will be truncated before being returned to you.
+    - Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of `cd`.
+    """
+    proc = await asyncio.create_subprocess_shell(
+        command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,  # 独立进程组，方便整组 kill
+    )
     try:
-        proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = proc.communicate(timeout=30)
-    except Exception as e:
-        proc.kill()
-        return f"Error: {str(e)}"
-    if stdout:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
         try:
-            result += stdout.decode('utf-8')
-        except UnicodeDecodeError:
-            result += stdout.decode('gbk', errors='replace')
-    if stderr:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+        return f"Error: timeout after {timeout}s"
+
+    def decode(b: bytes) -> str:
         try:
-            result += stderr.decode('utf-8')
+            return b.decode("utf-8")
         except UnicodeDecodeError:
-            result += stderr.decode('gbk', errors='replace')
-    return result
+            return b.decode("gbk", errors="replace")
+
+    return decode(stdout) + decode(stderr)
 
 
 class TodoManager:
@@ -150,7 +137,7 @@ class ToolManager:
         self.tool_registry = {}
         self.mcp_tool_schemas = []
         asyncio.run(self.register_mcp_tools(mcp_config))
-        self.register(read_file, write_file, edit_file, bash, todo_write)
+        self.register(bash, todo_write, *file_toolset)
         self.rounds_since_todo = -1  # todo reminder 计数器
 
     def register(self, *func: Callable):
@@ -268,11 +255,9 @@ class ToolManager:
                     for meta in args[1:]:
                         if isinstance(meta, FieldInfo):
                             param_description = meta.description or ""
-                            break
-                    # 如果还有其他元数据，可继续处理
 
                 # 生成该参数的 JSON Schema 片段
-                param_schema = type_to_json_schema(real_type)
+                param_schema = util.type_to_json_schema(real_type)
                 if param_description:
                     param_schema["description"] = param_description
 

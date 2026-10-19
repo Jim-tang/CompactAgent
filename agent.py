@@ -56,11 +56,14 @@ def retrieve_memory(
 
 @subagent_exclude
 async def run_subagent(
-        task: Annotated[str, Field(description="The task assigned to the subagent")],
-        skill: Annotated[str, Field(description="The available Skill required to complete the task", default="")],
-        label: Annotated[str, Field(description="Label to identify this subagent", default="Sub-Agent")]
+    task: Annotated[str, Field(description="A short (3-5 word) description of the task for the subagent to perform")],
+    skill: Annotated[str, Field(description="The available Skill required to complete the task")] = "",
+    label: Annotated[str, Field(description="Label to identify this subagent")] = "General-Agent"
 ) -> str:
-    """Run a subagent with fresh conversation context and one matched skill (if necessary), then return its final response."""
+    """
+    Run a subagent to handle tasks autonomously with fresh conversation context and one matched skill (if necessary), then return its final response.
+    Use this when you are researching complex questions, searching for code, or executing other complex and multistep tasks.
+    """
     # 子Agent独立的上下文管理器
     sub_ctx_manager = AgentContextManager(llm_client, CONFIG.get("compression", {}))
     if skill:
@@ -154,7 +157,7 @@ async def main():
 
         try:
             response = await run_agent(user_msg, context_manager, agent_label="main")
-            display(response)
+            display(f"{response}\n")
         except Exception as e:
             display(f"发生错误: {e}")
 
