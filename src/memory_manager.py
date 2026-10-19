@@ -19,11 +19,10 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from rank_bm25 import BM25Okapi
 
 from src.llm_client import OpenAIClient
-from src.common_utils import get_messages_text, render_prompt
+import src.common_utils as util
 from src.terminal_ui import display
 
 transformers.logging.set_verbosity_error()
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class LocalEmbeddings:
@@ -260,7 +259,7 @@ class MemoryManager:
     async def _consolidate_memories(self, memories: List[Tuple], batch_size: int = 10, max_concurrent: int = 5) -> List[str]:
         """异步整合记忆，每个元素包含（id,记忆文本,元数据），将重要的转为长期记忆"""
         semaphore = asyncio.Semaphore(max_concurrent)  # 控制并发数
-        prompt_template = PROJECT_ROOT / "template" / "memory_consolidate.md"
+        prompt_template = util.PROJECT_ROOT / "template" / "memory_consolidate.md"
         with open(prompt_template, 'r', encoding='utf-8') as f:
             template = f.read()
 
@@ -269,7 +268,7 @@ class MemoryManager:
                 memories_text = "\n---\n".join(f"### 记忆 {idx+1} ###\n{item[1]}" for idx, item in enumerate(batch))
                 messages = [
                     {"role": "system", "content": "你是一个记忆管理与评估专家，负责一个 Agent 系统的记忆模块，该模块具备将短期的会话记忆评估后整合为长期记忆的功能。"},
-                    {"role": "user", "content": render_prompt(template, {"memories_text": memories_text})},
+                    {"role": "user", "content": util.render_prompt(template, {"memories_text": memories_text})},
                 ]
                 try:
                     response = await self.llm_client.invoke(messages)
@@ -305,7 +304,7 @@ class MemoryManager:
         """提炼并存储本次会话的对话历史并记录至 Sessions.md"""
         if not session_msg:
             return "Empty session history, skip recording"
-        history_text = get_messages_text(session_msg)
+        history_text = util.get_messages_text(session_msg)
         session_note = await self.extract_session(history_text)
         topic = session_note.get("topic", "")
         summary = session_note.get("content", "")
@@ -316,12 +315,12 @@ class MemoryManager:
         return topic
 
     async def extract_session(self, history_text: str):
-        prompt_template = PROJECT_ROOT / "template" / "session_record.md"
+        prompt_template = util.PROJECT_ROOT / "template" / "session_record.md"
         with open(prompt_template, 'r', encoding='utf-8') as f:
             template = f.read()
         messages = [
             {"role": "system", "content": "你是一个会话分析与记忆提取专家。"},
-            {"role": "user", "content": render_prompt(template, {"conversation_history": history_text})},
+            {"role": "user", "content": util.render_prompt(template, {"conversation_history": history_text})},
         ]
         try:
             response = await self.llm_client.invoke(messages)

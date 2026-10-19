@@ -1,6 +1,5 @@
 import asyncio
 import json
-from pathlib import Path
 from typing import Annotated
 from pydantic import Field
 
@@ -9,11 +8,10 @@ from src.context_manager import AgentContextManager
 from src.hook_manager import AgentHookManager
 from src.tool_manager import ToolManager
 from src.memory_manager import MemoryManager
-from src.common_utils import subagent_exclude
+from src.common_utils import subagent_exclude, PROJECT_ROOT
 from src.terminal_ui import launch_ui, display
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
 with open(PROJECT_ROOT / "config.json", "r", encoding="utf-8") as f:
     CONFIG = json.load(f)
 

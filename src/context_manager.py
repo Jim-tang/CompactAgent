@@ -4,14 +4,11 @@ import re
 import yaml
 import asyncio
 import tiktoken
-from pathlib import Path
 from typing import Dict, List, Optional
 
 from src.llm_client import OpenAIClient
 from src.terminal_ui import display
 import src.common_utils as util
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class AgentContextManager:
@@ -36,7 +33,7 @@ class AgentContextManager:
 
         遍历 skills 下的每个子目录，读取 SKILL.md 文件并解析 YAML 头，提取 name 和 description
         """
-        skills_root = PROJECT_ROOT / "skills"
+        skills_root = util.PROJECT_ROOT / "skills"
         if not skills_root.exists():
             return
         for skill_dir in skills_root.iterdir():
@@ -64,7 +61,7 @@ class AgentContextManager:
 
     async def prepare_message(self):
         """上下文处理的核心方法：渲染模板 -> 动态扩展 -> 压缩，然后拼接历史记录返回完整消息列表"""
-        prompt_template = PROJECT_ROOT / "template" / "system_prompt.md"
+        prompt_template = util.PROJECT_ROOT / "template" / "system_prompt.md"
         with open(prompt_template, 'r', encoding='utf-8') as f:
             content = f.read()
         runtime_info = util.collect_runtime()
@@ -138,7 +135,7 @@ class AgentContextManager:
 
     async def summarize_with_llm(self, history_msg: list[dict]) -> str:
         """调用 LLM 接口生成历史对话的摘要"""
-        prompt_template = PROJECT_ROOT / "template" / "context_compression.md"
+        prompt_template = util.PROJECT_ROOT / "template" / "context_compression.md"
         with open(prompt_template, 'r', encoding='utf-8') as f:
             compression_prompt = f.read()
         messages = [

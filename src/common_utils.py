@@ -8,6 +8,8 @@ from pathlib import Path
 from string import Template
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 def subagent_exclude(func):
     """
     装饰器：标记该工具函数在子Agent中不可见。

@@ -7,8 +7,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from src.terminal_ui import get_ui
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+from src.common_utils import PROJECT_ROOT
 
 
 class HookReject:
