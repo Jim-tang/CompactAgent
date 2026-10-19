@@ -26,9 +26,13 @@
     "runtime_approval": ["file_write", "file_edit"]
   },
   "llm": {
-    "model": "MiniMax-M2.7",
-    "api_key": "123",
-    "base_url": "http://127.0.0.1:8080/v1"
+    "provider": "deepseek",
+    "model": "deepseek-flash",
+    "api_key": "",
+    "base_url": "https://api.deepseek.com",
+    "thinking": true,
+    "reasoning_effort": "high",
+    "timeout": 600
   },
   "memory": {
     "persist_directory": "./chroma_db",

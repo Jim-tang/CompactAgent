@@ -271,7 +271,8 @@ class MemoryManager:
                     {"role": "user", "content": util.render_prompt(template, {"memories_text": memories_text})},
                 ]
                 try:
-                    response = await self.llm_client.invoke(messages)
+                    # 记忆整合是 JSON 抽取任务，关闭 thinking 以降低延迟与 token 消耗
+                    response = await self.llm_client.invoke(messages, thinking=False)
                     content = response.get("content", "").strip()
                     if content.startswith("```json"):
                         content = re.sub(r'^```(?:json)?\s*', '', content).replace("```", "")
@@ -323,7 +324,8 @@ class MemoryManager:
             {"role": "user", "content": util.render_prompt(template, {"conversation_history": history_text})},
         ]
         try:
-            response = await self.llm_client.invoke(messages)
+            # 会话提炼是 JSON 抽取任务，关闭 thinking 以降低延迟与 token 消耗
+            response = await self.llm_client.invoke(messages, thinking=False)
             content = response.get("content", "").strip()
             if content.startswith("```json"):
                 content = re.sub(r'^```(?:json)?\s*', '', content).replace("```", "")

@@ -42,7 +42,7 @@ Python 3.10+，本项目不依赖内部的其他服务，但启动 / 运行时�
 
 | 依赖 | 用途 | 配置位置 |
 | --- | --- | --- |
-| OpenAI 兼容 LLM API | 主推理与摘要生成 | `config.json` → `llm` |
+| DeepSeek API（OpenAI 兼容） | 主推理、摘要与记忆提炼 | `config.json` → `llm`；API Key 读取环境变量 `DEEPSEEK_API_KEY` |
 | Jina Reader API (`r.jina.ai`) | 网页正文提取 | MCP 服务 `jina_reader` 的 `JINA_API_KEY` |
 | Serper 搜索 API (`google.serper.dev`) | 联网搜索 | MCP 服务 `serper_web_search` 请求头 `X-API-KEY` |
 | HuggingFace 模型仓库 | 首次运行下载 `BAAI/bge-m3`、`BAAI/bge-reranker-base` | `config.json` → `memory` |
@@ -51,11 +51,30 @@ Python 3.10+，本项目不依赖内部的其他服务，但启动 / 运行时�
 
 ### 快速启动
 
+先设置 DeepSeek API Key（`config.json` 中的 `llm.api_key` 留空即可）：
+
+```powershell
+# PowerShell
+$env:DEEPSEEK_API_KEY = "sk-..."
+```
+
+```bat
+:: cmd.exe
+set DEEPSEEK_API_KEY=sk-...
+```
+
+```bash
+# bash / zsh
+export DEEPSEEK_API_KEY=sk-...
+```
+
+然后启动：
+
 ```bash
 python agent.py
 ```
 
-启动流程：读取 `config.json` → 启动终端 UI（后台线程）→ 初始化 `OpenAIClient` / `AgentContextManager` / `MemoryManager` / `AgentHookManager` / `ToolManager`（含 MCP 工具注册）。
+启动流程：读取 `config.json` → 启动终端 UI（后台线程）→ 初始化 `OpenAIClient` / `AgentContextManager` / `MemoryManager` / `AgentHookManager` / `ToolManager`（含 MCP 工具注册）。未设置 Key 时会在初始化阶段直接报错并提示配置方式。
 
 ### 交互命令
 
@@ -69,7 +88,7 @@ python agent.py
 
 - `compression`：压缩模式、阈值、上下文长度、保留消息数；
 - `hooks`：输入 / 输出敏感词黑名单、脱敏策略、工具白名单、审批清单、沙箱根目录、输出截断参数、临时目录；
-- `llm`：模型 ID、API Key、Base URL（支持 `MODEL` / `API_KEY` / `BASE_URL` 环境变量覆盖）；
+- `llm`：提供方、模型 ID、Base URL、thinking 开关、`reasoning_effort`、超时、代理与重试次数。默认 `provider=deepseek`、`model=deepseek-flash`、`base_url=https://api.deepseek.com`；API Key 优先读取环境变量 `DEEPSEEK_API_KEY`（兼容 `API_KEY`），也可写入 `llm.api_key`；`DEEPSEEK_MODEL` / `DEEPSEEK_BASE_URL` 可覆盖模型与地址；
 - `memory`：Chroma 持久化目录、嵌入模型、TTL、检索阈值、混合权重；
 - `mcp`：MCP 服务列表（`stdio` / `streamable-http`）。
 
@@ -91,11 +110,11 @@ flowchart TB
         HOOK["AgentHookManager<br/>7 个安全钩子"]
         TOOL["ToolManager<br/>工具注册与执行"]
         MEM["MemoryManager<br/>Chroma + BM25 + Rerank"]
-        LLM["OpenAIClient<br/>OpenAI 兼容客户端"]
+        LLM["OpenAIClient<br/>DeepSeek 适配客户端"]
     end
 
     subgraph External["外部集成"]
-        LLMAPI["OpenAI 兼容 LLM API"]
+        LLMAPI["DeepSeek API<br/>thinking / tool calls"]
         MCP["MCP 服务<br/>jina_reader / serper_web_search"]
         HF["本地模型<br/>bge-m3 / bge-reranker"]
     end
@@ -124,7 +143,7 @@ CompactAgent/
 │   ├── common_utils.py       # 公共工具：装饰器、模板渲染、类型→JSON Schema、工作区树
 │   ├── context_manager.py    # 上下文管理：系统提示渲染、Skill 披露、历史压缩
 │   ├── hook_manager.py       # Hook 微内核与 7 个内置安全钩子
-│   ├── llm_client.py         # OpenAI 兼容客户端（单例、流式、并发信号量）
+│   ├── llm_client.py         # DeepSeek 适配客户端（单例、thinking、流式、tool_call 分片合并、并发信号量）
 │   ├── memory_manager.py     # 记忆系统：混合检索、重排、遗忘、会话归档
 │   ├── terminal_ui.py        # prompt_toolkit 分屏终端 UI（后台线程）
 │   └── tool_manager.py       # 工具注册、Schema 生成、并发执行、内置工具实现
@@ -146,7 +165,7 @@ CompactAgent/
 | 层面 | 技术 |
 | --- | --- |
 | 语言 / 运行时 | Python 3，asyncio，threading |
-| LLM 接入 | OpenAI Python SDK（`AsyncOpenAI`），httpx |
+| LLM 接入 | OpenAI Python SDK（`AsyncOpenAI`）对接 DeepSeek API，httpx |
 | 终端 UI | prompt_toolkit |
 | 函数调用 | Pydantic / `Annotated` + `Field`，运行时生成 JSON Schema |
 | MCP | FastMCP（`mcp` 包，Client / Server） |
@@ -194,6 +213,17 @@ sequenceDiagram
 ```
 
 工具调用并发执行（`asyncio.as_completed`），每个调用在执行前 / 后都会触发 Hook；连续 5 轮未调用 `todo_write` 时，主循环自动注入 `<system-reminder>` 催更。
+
+### DeepSeek 适配
+
+`OpenAIClient` 默认对接 DeepSeek API（`https://api.deepseek.com`，模型 `deepseek-flash`），针对 DeepSeek 协议做了以下处理：
+
+- **thinking 模式**：默认开启，通过 `extra_body={"thinking": {"type": "enabled"}}` 下发，`reasoning_effort` 可取 `low` / `high` / `max`；`config.json` → `llm.thinking` / `llm.reasoning_effort` 控制，`invoke()` 也支持按调用覆盖；
+- **reasoning_content 回传**：thinking 模式下请求历史中的每条 assistant 消息都必须回传 `reasoning_content`（没有可用推理时补空串），否则 API 返回 400；真实推理内容原样保留，本地压缩生成的摘要消息也能安全续接；
+- **流式 tool_call 合并**：DeepSeek 的 `tool_calls` 按 `index` 分片下发（`id` / `name` 只在首片、`arguments` 逐片拼接），客户端按 index 聚合后再交给 `ToolManager`；
+- **usage 统计**：开启 `stream_options.include_usage`，记录 `reasoning_tokens` 与 `prompt_cache_hit_tokens`；
+- **代理**：本地 / 内网 Base URL 自动绕过系统代理，公网 DeepSeek 默认继承 `HTTP(S)_PROXY`，也可用 `llm.proxy` 显式指定；
+- **后台任务**：上下文压缩、记忆整合、会话提炼等 JSON 抽取任务显式关闭 thinking，降低延迟与 token 消耗。
 
 ### 上下文压缩策略
 

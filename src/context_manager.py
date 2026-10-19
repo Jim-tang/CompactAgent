@@ -142,7 +142,8 @@ class AgentContextManager:
             {"role": "system", "content": compression_prompt},
             {"role": "user", "content": util.get_messages_text(history_msg)},
         ]
-        response = await self.llm_client.invoke(messages, temperature=0.3)
+        # 摘要是机械任务，显式关闭 thinking 以降低延迟与 token 消耗（仅对 DeepSeek 生效）
+        response = await self.llm_client.invoke(messages, temperature=0.3, thinking=False)
         summary = response.get("content", "").strip()
         display("[Summary]", summary.replace('\n', ' ').replace('\r', ' ')[:200])
         return summary
