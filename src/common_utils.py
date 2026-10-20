@@ -5,6 +5,8 @@ import platform
 import hashlib
 import shutil
 import tempfile
+import math
+import json
 from wcmatch import glob as wcglob
 from typing import Optional, Literal, Dict, get_origin, get_args, List, Union
 from pydantic import BaseModel
@@ -376,3 +378,39 @@ def atomic_write_with_backup(file_path: str, content: str, original: str) -> str
     os.replace(tmp_path, file_path)  # 原子替换
 
     return backup_path
+
+def parse_summary_content(content: str) -> str:
+    """解析 llm 生成的摘要，优先取 <summary> 标签，没有则剥离 <analysis> 后兜底返回"""
+    summary_pattern = re.compile(r"<summary[^>]*>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
+    match = summary_pattern.search(content)
+    if match:
+        return match.group(1).strip()
+
+    analysis_pattern = re.compile(r"<analysis[^>]*>.*?</analysis>", re.DOTALL | re.IGNORECASE)
+    fallback = analysis_pattern.sub("", content).strip()
+    return fallback or content.strip()
+
+def message_raw_tokens(message: dict, bytes_per_token: int = 4) -> int:
+    """单条消息的原始估算值，采用字符级启发式估算：约 4 字符 / token，向上四舍五入"""
+    try:
+        msg_str = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        msg_str =  str(message)
+
+    token = math.floor(0.5 + len(msg_str) / bytes_per_token)
+    return token
+
+def estimate_token_count(messages: list[dict]) -> int:
+    """回溯消息历史中最近的 usage 锚点，对后续增量消息估算 token 消耗量"""
+    token_count = 0
+    padding_factor = 4 / 3  # 字符启发式偏低估，给与补偿系数
+    for i in range(len(messages) - 1, -1, -1):
+        usage = messages[i].get("usage", {})
+        total_tokens = usage.get("total_tokens")
+        if isinstance(total_tokens, int) and total_tokens > 0:
+            # 找到有效的 usage 锚点直接返回
+            return math.ceil(token_count * padding_factor) + total_tokens
+        token_count += message_raw_tokens(messages[i])
+
+    # 未找到 usage 锚点，对全部消息做估算
+    return math.ceil(token_count * padding_factor)

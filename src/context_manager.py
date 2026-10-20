@@ -3,7 +3,6 @@ import os
 import re
 import yaml
 import asyncio
-import tiktoken
 from typing import Dict, List, Optional
 
 from src.llm_client import OpenAIClient
@@ -25,7 +24,17 @@ class AgentContextManager:
         self.active_instructions = {}                      # 存储当前已激活技能的完整指令的字典
         self.loaded_resources = {}                         # 存储已加载的技能资源文件的字典
         self.history_messages = []                         # 历史对话（不含 system）放到管理器内部维护
+        self._load_system_prompt()
         self._load_all_metadata()
+
+    def _load_system_prompt(self):
+        """加载系统提示的静态层"""
+        prompt_template = util.PROJECT_ROOT / "template" / "system_prompt.md"
+        with open(prompt_template, 'r', encoding='utf-8') as f:
+            content = f.read()
+        runtime_info = util.collect_runtime()
+        # 将运行时信息渲染至系统提示的模板
+        self.system_prompt = util.render_prompt(content, runtime_info)
 
     def _load_all_metadata(self):
         """
@@ -61,14 +70,8 @@ class AgentContextManager:
 
     async def prepare_message(self):
         """上下文处理的核心方法：渲染模板 -> 动态扩展 -> 压缩，然后拼接历史记录返回完整消息列表"""
-        prompt_template = util.PROJECT_ROOT / "template" / "system_prompt.md"
-        with open(prompt_template, 'r', encoding='utf-8') as f:
-            content = f.read()
-        runtime_info = util.collect_runtime()
-        # 将运行时信息渲染至系统提示的模板
-        system_prompt = util.render_prompt(content, runtime_info)
         # 动态扩展系统提示（渐进式披露）
-        extended_system_msg = self.extend_system_prompt(system_prompt)
+        extended_system_msg = self.extend_system_prompt()
         full_messages = extended_system_msg + self.history_messages
         # 扩展后的系统提示只参与阈值计算但不进行压缩，从而让模型看到 Skills 的完整指令
         if self._need_compact(full_messages):
@@ -94,9 +97,9 @@ class AgentContextManager:
             parts.append(f"\n[Loaded Resource] (path: {res_path})\n{content}")
         return "\n".join(parts) if parts else ""
 
-    def extend_system_prompt(self, base_prompt: str) -> List[dict]:
+    def extend_system_prompt(self) -> List[dict]:
         """根据 Skills 的激活状态，在系统消息后动态追加对应的元数据、指令以及资源"""
-        extended_content = base_prompt + self.get_metadata_prompt()
+        extended_content = self.system_prompt + self.get_metadata_prompt()
         active_ext = self.get_active_context_extension()
         if active_ext:
             extended_content += "\n" + active_ext
@@ -135,34 +138,17 @@ class AgentContextManager:
 
     async def summarize_with_llm(self, history_msg: list[dict]) -> str:
         """调用 LLM 接口生成历史对话的摘要"""
-        prompt_template = util.PROJECT_ROOT / "template" / "context_compression.md"
-        with open(prompt_template, 'r', encoding='utf-8') as f:
-            compression_prompt = f.read()
+        compress_instruction = util.PROJECT_ROOT / "template" / "context_compression.md"
+        with open(compress_instruction, 'r', encoding='utf-8') as f:
+            compress_instruction = f.read()
         messages = [
-            {"role": "system", "content": compression_prompt},
-            {"role": "user", "content": util.get_messages_text(history_msg)},
+            {"role": "system", "content": self.system_prompt},
+            *history_msg,
+            {"role": "user", "content": compress_instruction}
         ]
         response = await self.llm_client.invoke(messages, temperature=0.3)
         summary = response.get("content", "").strip()
-        display("[Summary]", summary.replace('\n', ' ').replace('\r', ' ')[:200])
         return summary
-
-    @staticmethod
-    def _count_messages_tokens(messages: List[dict]) -> int:
-        """近似计算消息列表的总 token"""
-        prompt_tokens = 0
-        try:
-            encoder = tiktoken.get_encoding(os.environ.get("MODEL"))
-        except ValueError:
-            # 更灵活的方案： encoder = AutoTokenizer.from_pretrained(os.environ.get("MODEL"))
-            encoder = tiktoken.get_encoding("cl100k_base")
-
-        for msg in messages:
-            # 序列化为紧凑 JSON
-            json_str = json.dumps(msg, ensure_ascii=False, separators=(',', ':'))
-            prompt_tokens += len(encoder.encode(json_str, disallowed_special=()))
-
-        return prompt_tokens
 
     def _need_compact(self, messages: List[dict]) -> bool:
         """判断消息列表是否需要压缩"""
@@ -179,27 +165,11 @@ class AgentContextManager:
             reserved_tokens = self.compress_config.get("reserved_tokens", 0)
             if max_token == 0:
                 return False
-            message_tokens = self._count_messages_tokens(messages)
+            message_tokens = util.estimate_token_count(messages)
             token_ratio = (reserved_tokens + message_tokens) / max_token
             return token_ratio >= threshold
         else:
             return False
-
-    @staticmethod
-    def _split_into_rounds(messages: List[dict]) -> List[List[dict]]:
-        """将消息列表按 user 角色分割成多个对话轮次。每个轮次以一个 user 消息开始，直到下一个 user 消息结束"""
-        rounds = []
-        current_round = []
-        for msg in messages:
-            if msg.get("role") == "user":
-                if current_round:  # 上一个轮次结束
-                    rounds.append(current_round)
-                current_round = [msg]
-            else:
-                current_round.append(msg)
-        if current_round:
-            rounds.append(current_round)
-        return rounds
 
     @staticmethod
     def _find_safe_split(messages: List[dict], keep_recent: int) -> int:
@@ -225,7 +195,7 @@ class AgentContextManager:
             split_idx += 1
         return split_idx
 
-    async def compact_history(self, max_workers: int = 5) -> List[dict]:
+    async def compact_history(self) -> List[dict]:
         """
         压缩历史消息，具体策略：
         - 根据配置的 keep_recent，保留最近 N 条消息，将剩余待压缩部分按 user 消息切分为多个轮次
@@ -239,19 +209,14 @@ class AgentContextManager:
         recent = self.history_messages[split_idx:]
 
         display(f"⏳ 正在执行上下文压缩 (compress_msg={len(to_compress)}, keep_msg={len(recent)})")
-
-        # 分割待压缩的对话轮次
-        rounds = self._split_into_rounds(to_compress)
-        tasks = [self.summarize_with_llm(round_msgs) for round_msgs in rounds]
-        thread_results = await asyncio.gather(*tasks)
-
-        # 按原始轮次顺序构建压缩后的消息列表
-        compressed_rounds = []
-        for idx, summary_content in enumerate(thread_results):
-            user_msg = rounds[idx][0]
-            summary_msg = {"role": "assistant", "content": summary_content}
-            compressed_rounds.extend([user_msg, summary_msg])
-        self.history_messages = compressed_rounds + recent
+        response = await self.summarize_with_llm(to_compress)
+        summary = util.parse_summary_content(response)
+        summary_msg = {
+            "role": "user",
+            "content": f"The following is a summary of the earlier conversation, before the compact boundary. Use it as background context.\n\n{summary}"
+        }
+        boundary = {"role": "system", "content": "[CompactBoundary]"}
+        self.history_messages = [summary_msg, boundary] + recent
 
         return self.history_messages
 

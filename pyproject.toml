@@ -22,7 +22,6 @@ dependencies = [
     "rank-bm25==0.2.2",
     "rjieba==0.2.1",
     "sentence-transformers==5.5.0",
-    "tiktoken==0.13.0",
     "torch==2.12.0",
     "transformers==4.57.6",
     "wcmatch==11.1",
