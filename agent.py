@@ -7,7 +7,6 @@ from src.llm_client import OpenAIClient
 from src.context_manager import AgentContextManager
 from src.hook_manager import AgentHookManager
 from src.tool_manager import ToolManager
-from src.memory_manager import MemoryManager
 from src.common_utils import subagent_exclude, PROJECT_ROOT
 from src.terminal_ui import launch_ui, display
 
@@ -23,6 +22,7 @@ tool_manager = ToolManager(mcp_config=CONFIG.get("mcp"))
 
 memory_enabled = CONFIG.get("memory").get("enabled", False)
 if memory_enabled:
+    from src.memory_manager import MemoryManager
     memory_manager = MemoryManager(llm_client, config=CONFIG.get("memory"))
 
 
@@ -114,7 +114,7 @@ async def run_agent(user_input: str, ctx_manager: AgentContextManager, max_itera
             ctx_manager.add_history({"role": "system", "content": "<system-reminder>Update your todos.</system-reminder>"})
 
     # 超出循环上限时返回对话历史的梗概
-    summary = await ctx_manager.summarize_with_llm(ctx_manager.history_messages)
+    summary = await ctx_manager.summarize_with_llm(ctx_manager.history_messages, "archive_session")
     return f"Max iterations reached, summary:\n{summary}"
 
 
