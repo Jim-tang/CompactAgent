@@ -195,7 +195,7 @@ class ToolManager:
         if isinstance(checked, HookReject):
             return tool_call_id, f"Error: {str(checked)}"
 
-        truncated_args = ', '.join([f"{k}={str(v).replace(chr(10), ' ')[:200]}" for k,v in tool_args.items()])
+        truncated_args = ', '.join([f"{k}={str(v).replace(chr(10), ' ')[:100]}" for k,v in tool_args.items()])
         display(f"[{agent_label}] [Tool] {tool_name}({truncated_args})")
 
         try:
@@ -218,7 +218,7 @@ class ToolManager:
 
         # ★工具调用后护栏★
         response = await hook_manager.emit("on_tool_end", response, tool_name)
-        display(f"[{agent_label}] [Result] {response.replace(chr(10), ' ').replace(chr(13), ' ')[:200]}")
+        display(f"[{agent_label}] [Result] {response.replace(chr(10), ' ').replace(chr(13), ' ')[:100]}")
 
         # 记录连续有多少轮tool_call没有更新todo
         if tool_name == 'todo_write':

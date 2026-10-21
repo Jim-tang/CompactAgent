@@ -238,7 +238,7 @@ class HumanInLoopHook:
     async def on_tool_start(self, state: dict, tool_args: dict, tool_name: str):
         if tool_name in self.approval_list:
             truncated_args = ', '.join(
-                f"{k}={str(v).replace(chr(10), ' ')[:200]}"
+                f"{k}={str(v).replace(chr(10), ' ')[:100]}"
                 for k, v in tool_args.items()
             )
             prompt = (

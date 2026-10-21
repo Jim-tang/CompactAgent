@@ -41,6 +41,8 @@ class OpenAIClient:
         if not all([self.model, api_key, base_url]):
             raise ValueError("模型ID、API密钥和服务地址必须被提供。")
 
+        self.base_url = base_url
+
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self.client = AsyncOpenAI(
             api_key=api_key,
@@ -71,6 +73,17 @@ class OpenAIClient:
             stream_mode = None
         is_streaming = stream_mode is not None
 
+        # usage 是本地统计字段，不属于 API 消息格式；DeepSeek 思考模式要求历史 assistant
+        # 消息回传 reasoning_content，压缩摘要等缺失该字段的消息补空串，否则 API 返回 400。
+        messages = [
+            {k: v for k, v in m.items() if k != "usage"} if isinstance(m, dict) else m
+            for m in messages
+        ]
+        if "deepseek" in self.base_url.lower():
+            for m in messages:
+                if isinstance(m, dict) and m.get("role") == "assistant":
+                    m.setdefault("reasoning_content", "")
+
         async with self._semaphore:
             try:
                 response = await self.client.chat.completions.create(
@@ -92,28 +105,66 @@ class OpenAIClient:
                 # 如果服务端还没生成完，迭代器会阻塞等待下一个数据块到来，直到最后收到 [DONE] 标记
                 collected_content = []
                 collected_reasoning = []
-                collected_tool_calls = []
-                async for chunk in response:
-                    reasoning = chunk.choices[0].delta.model_extra.get("reasoning_content", "")
-                    if reasoning:
-                        display_stream(reasoning, prefix="[reasoning]")
-                        collected_reasoning.append(reasoning)
+                collected_tool_calls = {}
+                usage = None
+                try:
+                    async for chunk in response:
+                        # 开启 include_usage 时，最后一个统计块的 choices 为空，
+                        # 直接取 choices[0] 会抛 IndexError 并截断整段输出
+                        if not chunk.choices:
+                            if getattr(chunk, "usage", None) is not None:
+                                usage = chunk.usage
+                            continue
 
-                    content = chunk.choices[0].delta.content or ""
-                    if content:
-                        if stream_mode == "full":
-                            display_stream(content)
-                        collected_content.append(content)
+                        delta = chunk.choices[0].delta
+                        extra = delta.model_extra or {}
+                        # reasoning_content 属于非标准扩展字段，SDK 可能放在
+                        # model_extra 里，也可能已提升为属性；model_extra 为
+                        # None 时直接 .get() 会抛 AttributeError
+                        reasoning = (
+                            extra.get("reasoning_content")
+                            or getattr(delta, "reasoning_content", None)
+                            or ""
+                        )
+                        if reasoning:
+                            display_stream(reasoning, prefix="[reasoning]")
+                            collected_reasoning.append(reasoning)
 
-                    if chunk.choices[0].delta.tool_calls:
-                        for tc in chunk.choices[0].delta.tool_calls:
-                            collected_tool_calls.append(tc.model_dump())
-                end_stream()
+                        content = delta.content or ""
+                        if content:
+                            if stream_mode == "full":
+                                display_stream(content)
+                            collected_content.append(content)
+
+                        # DeepSeek 等服务的 tool_calls 会按 index 分片下发：
+                        # id / name 通常只在首片出现，arguments 需要逐片拼接
+                        if delta.tool_calls:
+                            for tc in delta.tool_calls:
+                                slot = collected_tool_calls.setdefault(tc.index or 0, {
+                                    "id": None,
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                })
+                                if tc.id:
+                                    slot["id"] = tc.id
+                                if tc.type:
+                                    slot["type"] = tc.type
+                                if tc.function:
+                                    if tc.function.name:
+                                        slot["function"]["name"] += tc.function.name
+                                    if tc.function.arguments:
+                                        slot["function"]["arguments"] += tc.function.arguments
+
+                        if getattr(chunk, "usage", None) is not None:
+                            usage = chunk.usage
+                finally:
+                    # 无论正常结束还是中途异常，都必须按序收尾流式输出，
+                    # 否则 UI 的流式行状态和日志会残留半截内容
+                    end_stream()
 
                 result["content"] = "".join(collected_content)
                 result["reasoning_content"] = "".join(collected_reasoning)
-                result["tool_calls"] = collected_tool_calls if collected_tool_calls else None
-                usage = chunk.usage
+                result["tool_calls"] = [collected_tool_calls[i] for i in sorted(collected_tool_calls)] or None
             else:
                 if isinstance(response, str) and response.startswith("data:"):
                     # 将SSE格式的接口响应转换为 OpenAI 格式的 ChatCompletion 对象
@@ -123,7 +174,7 @@ class OpenAIClient:
                     response = ChatCompletion.model_validate(parsed)
                 message = response.choices[0].message
                 result["content"] = message.content
-                result["reasoning_content"] = response.choices[0].message.model_extra.get("reasoning_content", "")
+                result["reasoning_content"] = (message.model_extra or {}).get("reasoning_content", "")
                 result["tool_calls"] = [tc.model_dump() for tc in message.tool_calls] if message.tool_calls else None
                 usage = response.usage
 
@@ -134,3 +185,28 @@ class OpenAIClient:
             }
 
         return result
+
+
+if __name__ == "__main__":
+    # 运行方式（项目根目录下）：python -m src.llm_client
+    from pathlib import Path
+
+    _config_path = Path(__file__).resolve().parent.parent / "config.json"
+    with open(_config_path, "r", encoding="utf-8") as f:
+        _llm_config = json.load(f).get("llm", {})
+
+    launch_ui()
+
+    async def _smoke_test():
+        client = OpenAIClient(config=_llm_config)
+        messages = [{"role": "user", "content": "用一句话介绍你自己。"}]
+        result = await client.invoke(messages, temperature=0, stream_mode="reasoning_only")
+        display(result.get("content"))
+        # UI 在后台线程按刷新周期绘制，留出一帧时间再退出进程，
+        # 避免最后一段流式内容已进入缓冲却还没画到屏幕上
+        await asyncio.sleep(0.3)
+
+    try:
+        asyncio.run(_smoke_test())
+    except ValueError as error:
+        print(f"配置错误: {error}")

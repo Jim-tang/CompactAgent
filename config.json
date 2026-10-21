@@ -26,9 +26,9 @@
     "runtime_approval": ["file_write", "file_edit"]
   },
   "llm": {
-    "model": "MiniMax-M2.7",
-    "api_key": "123",
-    "base_url": "http://127.0.0.1:8080/v1"
+    "model": "deepseek-flash",
+    "api_key": "sk-5a57673bc8a14730b1b155544d068172",
+    "base_url": "https://api.deepseek.com"
   },
   "memory": {
     "enable": false,
@@ -44,7 +44,7 @@
       "jina_reader": {
         "type": "stdio",
         "command": "python",
-        "args": ["D:\\NoteBooks\\Agent\\mcp_service\\server\\jina_reader.py"],
+        "args": ["D:\\Python\\CompactAgent\\mcp_service\\server\\jina_reader.py"],
         "env": {
           "JINA_API_KEY": "jina_88c3c63fcb7944c5b5e1e8061e7e80ed-7O0Fgps3Ow_h7vEHsLSlgTS1zcI"
         }

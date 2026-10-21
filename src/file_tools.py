@@ -237,31 +237,38 @@ def file_glob(
 def file_grep(
     pattern: Annotated[str, Field(description="The regular expression pattern to search for in file contents")],
     mode: Annotated[Literal["files_with_matches", "content"], Field(description="Output mode")],
-    path: Annotated[Optional[str], Field(description="Optional directory path to search in. If not specified, the current working directory will be used.")] = None,
+    path: Annotated[Optional[str], Field(description="Optional path to search in. Can be a directory or a specific file. If not specified, the current working directory will be used.")] = None,
     context: Annotated[Optional[int], Field(description="Lines of context before and after each match. Only used when under 'content' mode.", ge=1, le=10)] = None,
     n: Annotated[bool, Field(description="Whether to show line numbers. Only used when under 'content' mode.")] = True,
     i: Annotated[bool, Field(description='Case-insensitive search')] = False,
     type: Annotated[Optional[str], Field(description='File type filter (e.g. py, ts, rust).')] = None,
 ) -> str:
-    """Search file contents with a regular expression. VCS directories (.git, .svn, etc.) are skipped.
+    """Search file contents with a regular expression. When searching a directory, VCS directories (.git, .svn, etc.) are skipped.
 
     Usage notes:
+    - `path` may be a directory or a specific file. When it is a file, only that file is searched and .gitignore rules do not apply to it.
     - Two output modes: `files_with_matches` return the paths of files containing at least one match, `content` shows matching lines optionally with surrounding context and line numbers.
     - In `content` mode, each line is formatted as <path>:<lineno>:<text> for matches and <path>-<lineno>-<text> for context.
-    - Paths are relative to `root_path` and sorted by modification time (newest first).
+    - Paths are relative to the search root (the given directory, or the parent directory of the given file) and sorted by modification time (newest first).
     """
-    search_root = util.resolve_root(path)
-    if not os.path.isdir(search_root):
-        raise NotADirectoryError(search_root)
+    target = util.resolve_root(path)
+    if os.path.isfile(target):
+        # 显式指定文件：只搜该文件，且不应用 .gitignore 过滤（与 ripgrep 行为一致）
+        search_root = os.path.dirname(target) or os.getcwd()
+        candidates = [target]
+    elif os.path.isdir(target):
+        search_root = target
+        all_files = util.collect_files(search_root)
+        ignore_patterns = util.load_gitignore(search_root)
+        candidates = util.filter_by_gitignore(all_files, search_root, ignore_patterns)
+    else:
+        raise NotADirectoryError(target)
 
     try:
         regex = re.compile(pattern, re.IGNORECASE if i else 0)
     except re.error as e:
         raise ValueError(f'Invalid regex: {e}') from e
 
-    all_files = util.collect_files(search_root)
-    ignore_patterns = util.load_gitignore(search_root)
-    candidates = util.filter_by_gitignore(all_files, search_root, ignore_patterns)
     candidates = util.filter_by_type(candidates, type)
 
     if mode == "files_with_matches":
