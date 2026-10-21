@@ -71,6 +71,11 @@ def _detect_msg_type(text: str) -> str:
 class _OutputLexer(Lexer):
     """输出区 Lexer：按行内容分类着色（不使用 ANSI 转义序列）"""
 
+    def __init__(self, line_types: list[str]):
+        # 与 TerminalUI._lines 一一对应。软折行产生的续行没有行首标识，
+        # 但会沿用所属消息首行的类型，避免只有第一行有颜色。
+        self._line_types = line_types
+
     def lex_document(self, document):
         """返回 prompt_toolkit 所需的（样式，行号）列表"""
         lines = document.lines
@@ -79,8 +84,12 @@ class _OutputLexer(Lexer):
             if lineno < 0 or lineno >= len(lines):
                 return []
             line = lines[lineno]
-            # 按规则整行着色
-            return [(f"class:output-{_detect_msg_type(line)}", line)]
+            if lineno < len(self._line_types):
+                msg_type = self._line_types[lineno]
+            else:
+                # 兜底：类型表未同步时仍按内容识别
+                msg_type = _detect_msg_type(line)
+            return [(f"class:output-{msg_type}", line)]
 
         return get_line
 
@@ -122,6 +131,7 @@ class TerminalUI:
         self.error: str | None = None
 
         self._lines: list[str] = []  # 输出区文本缓冲（list[str]，按行存储）
+        self._line_types: list[str] = []  # 与 _lines 一一对应的消息类型（着色用）
         self._exit = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._app: Application | None = None
@@ -237,6 +247,11 @@ class TerminalUI:
             except Exception:
                 pass
 
+    def _add_line(self, text: str, msg_type: str) -> None:
+        """追加一行文本，并记录它的着色类型（续行由调用方传入首行类型）"""
+        self._lines.append(text)
+        self._line_types.append(msg_type)
+
     def _append_stream(self, is_first: bool, text: str, prefix: str) -> None:
         """把流式分片追加到 _lines。
 
@@ -259,10 +274,11 @@ class TerminalUI:
             or prefix != self._stream_prefix
         )
         body_prefix = "│ " if prefix == "[reasoning]" else ""
+        line_type = _detect_msg_type(prefix) if prefix else "default"
         if new_line:
             if prefix == "[reasoning]":
-                self._lines.append(prefix)
-            self._lines.append(body_prefix)
+                self._add_line(prefix, line_type)
+            self._add_line(body_prefix, line_type)
             self._stream_line_idx = len(self._lines) - 1
             self._stream_prefix = prefix
             self._stream_col = len(body_prefix)
@@ -274,7 +290,7 @@ class TerminalUI:
         idx = self._stream_line_idx
         for char in text:
             if char == "\n":
-                self._lines.append(body_prefix)
+                self._add_line(body_prefix, line_type)
                 idx = len(self._lines) - 1
                 self._stream_col = len(body_prefix)
                 continue
@@ -282,7 +298,7 @@ class TerminalUI:
             if char_width < 0:
                 char_width = 0
             if self._stream_col + char_width > width:
-                self._lines.append(body_prefix)
+                self._add_line(body_prefix, line_type)
                 idx = len(self._lines) - 1
                 self._stream_col = len(body_prefix)
             self._lines[idx] += char
@@ -310,14 +326,19 @@ class TerminalUI:
                 columns = 80
         return max(10, columns - 2)
 
-    def _wrap_plain_text(self, text: str) -> list[str]:
-        """普通输出也按显示宽度折行，避免单条超长消息撑出逻辑长行"""
+    def _wrap_plain_text(self, text: str) -> list[tuple[str, str]]:
+        """普通输出按显示宽度折行，返回 (行文本, 消息类型)。
+
+        消息类型在折行前按原始行识别，再套用到该行的所有折行片段，
+        这样续行不会因为没有行首标识而退回默认样式。
+        """
         width = self._content_width()
         text = text.replace("\r\n", "\n").replace("\r", "").replace("\t", "    ")
-        result: list[str] = []
+        result: list[tuple[str, str]] = []
         for raw in text.split("\n"):
+            msg_type = _detect_msg_type(raw)
             if not raw:
-                result.append("")
+                result.append(("", msg_type))
                 continue
             line = ""
             col = 0
@@ -326,12 +347,12 @@ class TerminalUI:
                 if char_width < 0:
                     char_width = 0
                 if col + char_width > width and line:
-                    result.append(line)
+                    result.append((line, msg_type))
                     line = ""
                     col = 0
                 line += char
                 col += char_width
-            result.append(line)
+            result.append((line, msg_type))
         return result
 
     def _trim_lines(self) -> None:
@@ -340,6 +361,7 @@ class TerminalUI:
         if overflow <= 0:
             return
         del self._lines[:overflow]
+        del self._line_types[:overflow]
         if self._stream_line_idx is not None:
             self._stream_line_idx -= overflow
             if self._stream_line_idx < 0:
@@ -358,7 +380,8 @@ class TerminalUI:
             # 非流式文本会打断当前流式行，下一分片应另起一行
             self._stream_line_idx = None
             self._stream_prefix = None
-            self._lines.extend(self._wrap_plain_text(item))
+            for line, msg_type in self._wrap_plain_text(item):
+                self._add_line(line, msg_type)
 
         self._trim_lines()
 
@@ -467,7 +490,7 @@ class TerminalUI:
             wrap_lines=True,
             focusable=False,
             focus_on_click=False,
-            lexer=_OutputLexer(),
+            lexer=_OutputLexer(self._line_types),
         )
         # 覆盖 TextArea 内部 Window 的默认滚轮处理，否则 wrap_lines=True
         # 时长行上的回滚会被 prompt_toolkit 自己的滚动重算抵消
