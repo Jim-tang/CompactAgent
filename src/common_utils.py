@@ -414,3 +414,35 @@ def estimate_token_count(messages: list[dict]) -> int:
 
     # 未找到 usage 锚点，对全部消息做估算
     return token_count
+
+def parse_session_summary(raw: str) -> dict:
+    text = raw.strip()
+    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        json_re = re.compile(r"\{.*\}", re.DOTALL)
+        m = json_re.search(text)
+        if not m:
+            raise ValueError(f"Failed to extract JSON: {raw[:200]}")
+        obj = json.loads(m.group(0))
+
+    topic = str(obj.get("topic", "")).strip()
+    content = str(obj.get("content", "")).strip()
+
+    # keywords 容错：非列表、空值、非字符串元素都过滤掉
+    raw_kw = obj.get("keywords")
+    keywords = set()
+    if isinstance(raw_kw, list):
+        for k in raw_kw:
+            if isinstance(k, str) and k.strip():
+                keywords.add(k.strip())
+    keywords = list(keywords)[:5]  # 硬截断保护
+
+    return {
+        "topic": topic[:40],
+        "content": content[:500],
+        "keywords": keywords,
+    }

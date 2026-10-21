@@ -4,6 +4,7 @@ import re
 import yaml
 import asyncio
 from typing import Dict, List, Optional
+from datetime import datetime
 
 from src.llm_client import OpenAIClient
 from src.terminal_ui import display
@@ -23,9 +24,10 @@ class AgentContextManager:
         self.metadata_cache = {}                           # 存储所有技能元数据的字典
         self.active_instructions = {}                      # 存储当前已激活技能的完整指令的字典
         self.loaded_resources = {}                         # 存储已加载的技能资源文件的字典
+        self.system_message = []                           # 系统消息（静态层+动态层）
         self.history_messages = []                         # 历史对话（不含 system）放到管理器内部维护
         self._compaction_task = None                       # 后台压缩任务
-        self.system_prompt_tokens = 0
+        self.session_dir = os.path.join(util.PROJECT_ROOT, "sessions")
         self._load_system_prompt()
         self._load_all_metadata()
 
@@ -73,11 +75,10 @@ class AgentContextManager:
     async def prepare_message(self):
         """上下文处理的核心方法：动态扩展 -> 压缩，然后拼接历史记录返回完整消息列表"""
         # 渐进式披露
-        system_message = self.extend_system_prompt()
-        self.system_prompt_tokens = util.estimate_token_count(system_message)
+        self.system_message = self.extend_system_prompt()
         # 消费后台压缩结果
         self._apply_pending_compaction()
-        full_messages = system_message + self.history_messages
+        full_messages = self.system_message + self.history_messages
         strategy = self._compact_strategy(full_messages)
 
         if strategy == "blocking":
@@ -89,8 +90,7 @@ class AgentContextManager:
                 # 启动后台压缩，本轮立即返回
                 self._start_background_compaction()
 
-        # 实际发送给 LLM 的消息列表：完整的系统提示 + 压缩的对话历史
-        return system_message + self.history_messages
+        return self.system_message + self.history_messages
 
     def get_metadata_prompt(self) -> str:
         """生成注入到系统提示的技能元数据列表"""
@@ -149,15 +149,15 @@ class AgentContextManager:
         self.loaded_resources[key] = content
         return f"Resource loaded. Content preview:\n{content[:200]}"
 
-    async def summarize_with_llm(self, history_msg: list[dict]) -> str:
+    async def summarize_with_llm(self, history_msg: list[dict], instruction_type: str) -> str:
         """调用 LLM 接口生成历史对话的摘要"""
-        compress_instruction = util.PROJECT_ROOT / "template" / "context_compression.md"
-        with open(compress_instruction, 'r', encoding='utf-8') as f:
-            compress_instruction = f.read()
+        template_file = util.PROJECT_ROOT / "template" / f"{instruction_type}.md"
+        with open(template_file, 'r', encoding='utf-8') as f:
+            instruction = f.read()
         messages = [
             {"role": "system", "content": self.system_prompt},
             *history_msg,
-            {"role": "user", "content": compress_instruction}
+            {"role": "user", "content": instruction}
         ]
         response = await self.llm_client.invoke(messages, temperature=0.3)
         summary = response.get("content", "").strip()
@@ -251,14 +251,15 @@ class AgentContextManager:
         if split_idx > len(self.history_messages):
             return False
 
-        before_tokens = self.system_prompt_tokens + util.estimate_token_count(self.history_messages)
+        system_prompt_tokens = util.estimate_token_count(self.system_message)
+        before_tokens = system_prompt_tokens + util.estimate_token_count(self.history_messages)
         self.history_messages = self._form_compacted_history(summary, split_idx)
-        after_tokens = self.system_prompt_tokens + util.estimate_token_count(self.history_messages)
+        after_tokens = system_prompt_tokens + util.estimate_token_count(self.history_messages)
         display(f"[Agent] 上下文压缩完成: {before_tokens} Tokens -> {after_tokens} Tokens")
         return True
 
     async def _run_compaction(self, snapshot: List[dict]):
-        summary = await self.summarize_with_llm(snapshot)
+        summary = await self.summarize_with_llm(snapshot, "context_compression")
         return len(snapshot), summary
 
     def _start_background_compaction(self) -> bool:
@@ -300,3 +301,56 @@ class AgentContextManager:
         self.history_messages.clear()
         self.active_instructions.clear()
         self.loaded_resources.clear()
+
+    async def archive_session(self):
+        """提炼并存储本次会话的对话历史并归档至 Sessions.md"""
+        if not self.history_messages:
+            display("[Agent] Warning: Empty session history, skip recording")
+            return
+        os.makedirs(self.session_dir, exist_ok=True)
+        try:
+            raw = await self.summarize_with_llm(self.history_messages, "archive_session")
+            session_note = util.parse_session_summary(raw)
+            topic = session_note.get("topic")
+            summary = session_note.get("content")
+            keywords = session_note.get("keywords")
+            timestamp = datetime.now().isoformat()
+            self.update_session_md(topic, summary, timestamp, keywords)
+            archive_path = self.save_session_json(topic, timestamp)
+            display(f"[Agent] 已归档会话：{archive_path}")
+        except Exception as e:
+            display(f"[Agent] Error: 会话归档失败: {e}")
+
+    def update_session_md(self, topic: str, content: str, timestamp: str, keywords:list[str]) -> None:
+        """将新的会话条目增量追加到 Sessions.md（插入到文件开头）"""
+        entry_lines = [
+            f"### {topic}\n",
+            f"> **{datetime.fromisoformat(timestamp).strftime('%Y-%m-%d %H:%M:%S')}**\n",
+            f"> **Key Word: {' | '.join(keywords)}**\n"
+            f"> {content}\n",
+            "---\n",
+        ]
+        entry_text = "".join(entry_lines)
+        session_file_path = os.path.join(self.session_dir, "Sessions.md")
+        if os.path.exists(session_file_path):
+            with open(session_file_path, "r", encoding="utf-8") as f:
+                existing = f.read()
+            new_content = entry_text + existing
+        else:
+            new_content = entry_text
+
+        with open(session_file_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+    def save_session_json(self, topic: str, timestamp: str) -> str:
+        """将完整对话历史保存为 JSON 文件"""
+        safe_topic = re.sub(r'[<>:"/\\|?*]', '_', topic)
+        safe_timestamp = datetime.fromisoformat(timestamp).strftime("%Y%m%d_%H%M%S")
+        filepath = os.path.join(self.session_dir, f"{safe_timestamp}_{safe_topic}.json")
+        session_data = {
+            "topic": topic,
+            "messages": self.system_message + self.history_messages,
+        }
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(session_data, f, ensure_ascii=False, indent=2)
+        return filepath

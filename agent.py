@@ -16,11 +16,14 @@ with open(PROJECT_ROOT / "config.json", "r", encoding="utf-8") as f:
     CONFIG = json.load(f)
 
 ui = launch_ui()
-llm_client = OpenAIClient(config=CONFIG.get("llm", {}))
-context_manager = AgentContextManager(llm_client, CONFIG.get("compression", {}))
-memory_manager = MemoryManager(llm_client, config=CONFIG.get("memory", {}))
-hook_manager = AgentHookManager(config=CONFIG.get("hooks", {}))
+llm_client = OpenAIClient(config=CONFIG.get("llm"))
+context_manager = AgentContextManager(llm_client, CONFIG.get("compression"))
+hook_manager = AgentHookManager(config=CONFIG.get("hooks"))
 tool_manager = ToolManager(mcp_config=CONFIG.get("mcp"))
+
+memory_enabled = CONFIG.get("memory").get("enabled", False)
+if memory_enabled:
+    memory_manager = MemoryManager(llm_client, config=CONFIG.get("memory"))
 
 
 @subagent_exclude
@@ -72,7 +75,11 @@ async def run_subagent(
     response = await run_agent(task, sub_ctx_manager, is_sub=True, agent_label=label)
     return f"[subagent({label})] {response}"
 
-tool_manager.register(active_skill, load_skill_resource, retrieve_memory, run_subagent)
+
+tool_manager.register(active_skill, load_skill_resource, run_subagent)
+if memory_enabled:
+    tool_manager.register(retrieve_memory)
+
 
 async def run_agent(user_input: str, ctx_manager: AgentContextManager, max_iterations: int = 30, is_sub: bool = False, agent_label: str = "") -> str:
     # ★用户输入护栏★
@@ -110,6 +117,7 @@ async def run_agent(user_input: str, ctx_manager: AgentContextManager, max_itera
     summary = await ctx_manager.summarize_with_llm(ctx_manager.history_messages)
     return f"Max iterations reached, summary:\n{summary}"
 
+
 async def main():
     ui_error = ui.get_error()
     if ui_error:
@@ -141,7 +149,7 @@ async def main():
                 await asyncio.sleep(2)
                 break
             elif cmd == '/reset':
-                await memory_manager.record_session(context_manager.history_messages)
+                await context_manager.archive_session()
                 context_manager.reset_session()
                 display("\n[Agent] 会话已重置，可以开始新的对话。")
                 continue
@@ -161,11 +169,12 @@ async def main():
         except Exception as e:
             display(f"发生错误: {e}")
 
-    await memory_manager.record_session(context_manager.history_messages)
+    await context_manager.archive_session()
 
     # ★会话结束护栏★
     await hook_manager.emit("on_session_end")
     ui.request_exit()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
