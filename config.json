@@ -1,10 +1,10 @@
 {
   "compression": {
     "mode": "message_count",
-    "threshold": 30,
+    "threshold": 20,
     "max_context_length": 64000,
     "reserved_tokens": 8000,
-    "keep_recent": 6
+    "keep_recent": 4
   },
   "hooks": {
     "input_blacklist": ["忽略之前的所有指令", "ignore previous instructions"],
@@ -19,7 +19,7 @@
       "write_file": {"sandbox_root": "D:\\NoteBooks\\Agent"}
     },
     "truncation_config": {
-      "max_output_chars": 20480,
+      "max_output_chars": 40960,
       "preserve_head_ratio": 0.7
     },
     "temp_dir": ".temp/",

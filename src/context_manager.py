@@ -24,6 +24,8 @@ class AgentContextManager:
         self.active_instructions = {}                      # 存储当前已激活技能的完整指令的字典
         self.loaded_resources = {}                         # 存储已加载的技能资源文件的字典
         self.history_messages = []                         # 历史对话（不含 system）放到管理器内部维护
+        self._compaction_task = None                       # 后台压缩任务
+        self.system_prompt_tokens = 0
         self._load_system_prompt()
         self._load_all_metadata()
 
@@ -69,15 +71,26 @@ class AgentContextManager:
         self.history_messages.append(message)
 
     async def prepare_message(self):
-        """上下文处理的核心方法：渲染模板 -> 动态扩展 -> 压缩，然后拼接历史记录返回完整消息列表"""
-        # 动态扩展系统提示（渐进式披露）
-        extended_system_msg = self.extend_system_prompt()
-        full_messages = extended_system_msg + self.history_messages
-        # 扩展后的系统提示只参与阈值计算但不进行压缩，从而让模型看到 Skills 的完整指令
-        if self._need_compact(full_messages):
-            full_messages = extended_system_msg + await self.compact_history()
+        """上下文处理的核心方法：动态扩展 -> 压缩，然后拼接历史记录返回完整消息列表"""
+        # 渐进式披露
+        system_message = self.extend_system_prompt()
+        self.system_prompt_tokens = util.estimate_token_count(system_message)
+        # 消费后台压缩结果
+        self._apply_pending_compaction()
+        full_messages = system_message + self.history_messages
+        strategy = self._compact_strategy(full_messages)
+
+        if strategy == "blocking":
+            display("[Agent] 上下文超出硬限制，等待后台压缩完成...")
+            await self._compact_blocking()
+
+        if strategy == "background":
+            if not self._is_compacting():
+                # 启动后台压缩，本轮立即返回
+                self._start_background_compaction()
+
         # 实际发送给 LLM 的消息列表：完整的系统提示 + 压缩的对话历史
-        return full_messages
+        return system_message + self.history_messages
 
     def get_metadata_prompt(self) -> str:
         """生成注入到系统提示的技能元数据列表"""
@@ -150,26 +163,33 @@ class AgentContextManager:
         summary = response.get("content", "").strip()
         return summary
 
-    def _need_compact(self, messages: List[dict]) -> bool:
-        """判断消息列表是否需要压缩"""
+    def _compact_strategy(self, messages: List[dict]) -> str:
+        """判断消息列表是否需要压缩以及对应的压缩策略: skip | background | blocking"""
         if not self.compress_config:
-            return False
+            return "skip"
         if len(messages) <= self.compress_config.get("keep_recent"):
-            return False  # 消息数量不足 keep_recent，无需压缩
+            return "skip"  # 消息数量不足 keep_recent，无需压缩
+
         mode = self.compress_config.get("mode")
         threshold = self.compress_config.get("threshold")
         if mode == "message_count":
-            return len(messages) >= threshold
+            return "background"  if len(messages) >= threshold else "skip"
+
         elif mode == "token_ratio":
-            max_token = self.compress_config.get("max_context_length", 0)
-            reserved_tokens = self.compress_config.get("reserved_tokens", 0)
-            if max_token == 0:
-                return False
+            max_token = self.compress_config.get("max_context_length", 128 * 1024)
+            reserved_tokens = self.compress_config.get("reserved_tokens", 8 * 1024)
+            blocking_threshold = self.compress_config.get("blocking_threshold", 0.9)
             message_tokens = util.estimate_token_count(messages)
             token_ratio = (reserved_tokens + message_tokens) / max_token
-            return token_ratio >= threshold
+            if token_ratio >= blocking_threshold:
+                return "blocking"
+            elif token_ratio >= threshold:
+                return "background"
+            else:
+                return "skip"
+
         else:
-            return False
+            return "skip"
 
     @staticmethod
     def _find_safe_split(messages: List[dict], keep_recent: int) -> int:
@@ -195,29 +215,84 @@ class AgentContextManager:
             split_idx += 1
         return split_idx
 
-    async def compact_history(self) -> List[dict]:
-        """
-        压缩历史消息，具体策略：
-        - 根据配置的 keep_recent，保留最近 N 条消息，将剩余待压缩部分按 user 消息切分为多个轮次
-        - 每个轮次的所有消息压缩为一条摘要，同时保留 user 消息原文
-        - 压缩后的轮次按原序排列，再拼接上尾部 recent 消息，替换内部维护的对话历史列表
-        """
-        # 分割待压缩部分 + 保留部分
-        keep_recent = self.compress_config.get("keep_recent", 10)
-        split_idx = self._find_safe_split(self.history_messages, keep_recent)
-        to_compress = self.history_messages[:split_idx]
-        recent = self.history_messages[split_idx:]
+    def _is_compacting(self) -> bool:
+        return self._compaction_task is not None and not self._compaction_task.done()
 
-        display(f"⏳ 正在执行上下文压缩 (compress_msg={len(to_compress)}, keep_msg={len(recent)})")
-        response = await self.summarize_with_llm(to_compress)
-        summary = util.parse_summary_content(response)
+    def _form_compacted_history(self, summary: str, split_idx: int) -> List[dict]:
         summary_msg = {
             "role": "user",
             "content": f"The following is a summary of the earlier conversation, before the compact boundary. Use it as background context.\n\n{summary}"
         }
         boundary = {"role": "system", "content": "[CompactBoundary]"}
-        self.history_messages = [summary_msg, boundary] + recent
 
+        # 用切片保留压缩期间新追加的尾部消息
+        recent = self.history_messages[split_idx:]
+        for msg in recent:
+            # 压缩改变了前缀，旧的 token 锚点已失效
+            msg.pop("usage", None)
+
+        compacted_history = [summary_msg, boundary] + recent
+        return compacted_history
+
+    def _apply_pending_compaction(self) -> bool:
+        """消费已完成的压缩结果，同步执行避免竞态"""
+        if self._compaction_task is None or self._is_compacting():
+            return False
+
+        try:
+            split_idx, summary = self._compaction_task.result()
+        except (Exception, asyncio.CancelledError) as e:
+            display(f"[Agent] Error: 上下文压缩失败: {e}")
+            return False
+        finally:
+            self._compaction_task = None
+
+        # history 被外部重置，丢弃本次结果
+        if split_idx > len(self.history_messages):
+            return False
+
+        before_tokens = self.system_prompt_tokens + util.estimate_token_count(self.history_messages)
+        self.history_messages = self._form_compacted_history(summary, split_idx)
+        after_tokens = self.system_prompt_tokens + util.estimate_token_count(self.history_messages)
+        display(f"[Agent] 上下文压缩完成: {before_tokens} Tokens -> {after_tokens} Tokens")
+        return True
+
+    async def _run_compaction(self, snapshot: List[dict]):
+        summary = await self.summarize_with_llm(snapshot)
+        return len(snapshot), summary
+
+    def _start_background_compaction(self) -> bool:
+        """通过创建一个独立的协程在后台并发执行压缩任务（不阻塞网络IO）"""
+        keep_recent = self.compress_config.get("keep_recent", 10)
+        split_idx = self._find_safe_split(self.history_messages, keep_recent)
+        if split_idx <= 0:
+            return False
+
+        # 快照压缩区间，避免后台任务期间被外部修改
+        snapshot = [dict(m) for m in self.history_messages[:split_idx]]
+        recent = self.history_messages[split_idx:]
+
+        display(f"[Agent] 启动后台上下文压缩 (compress_msg={len(snapshot)}, keep_msg={len(recent)})")
+        self._compaction_task = asyncio.create_task(self._run_compaction(snapshot))
+        return True
+
+    async def _compact_blocking(self):
+        if not self._is_compacting():
+            if not self._start_background_compaction():
+                display("[Agent] Warning: 无可压缩历史")
+                return
+        try:
+            await self._compaction_task
+        except asyncio.CancelledError:
+            self._apply_pending_compaction()
+            raise
+        except Exception as e:
+            display(f"[Agent] Error：上下文压缩失败 {e}")
+
+        self._apply_pending_compaction()
+
+    async def manual_compact(self) -> List[dict]:
+        await self._compact_blocking()
         return self.history_messages
 
     def reset_session(self):

@@ -137,19 +137,19 @@ async def main():
         if user_msg.startswith('/'):
             cmd = user_msg.lower()
             if cmd in ('/exit', '/quit'):
-                display("\n📦 会话结束，正在清理临时文件并归档会话历史")
+                display("\n[Agent] 会话结束，正在清理临时文件并归档会话历史")
                 await asyncio.sleep(2)
                 break
             elif cmd == '/reset':
                 await memory_manager.record_session(context_manager.history_messages)
                 context_manager.reset_session()
-                display("\n🔄 会话已重置，可以开始新的对话。")
+                display("\n[Agent] 会话已重置，可以开始新的对话。")
                 continue
             elif cmd == '/compact':
                 try:
-                    await context_manager.compact_history()
+                    await context_manager.manual_compact()
                 except Exception as e:
-                    display(f"❌ 压缩时发生错误: {e}")
+                    display(e)
                 continue
             else:
                 display(f"未知命令: {user_msg}，可用命令：/exit, /reset, /compact")

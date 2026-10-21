@@ -403,14 +403,14 @@ def message_raw_tokens(message: dict, bytes_per_token: int = 4) -> int:
 def estimate_token_count(messages: list[dict]) -> int:
     """回溯消息历史中最近的 usage 锚点，对后续增量消息估算 token 消耗量"""
     token_count = 0
-    padding_factor = 4 / 3  # 字符启发式偏低估，给与补偿系数
     for i in range(len(messages) - 1, -1, -1):
         usage = messages[i].get("usage", {})
         total_tokens = usage.get("total_tokens")
         if isinstance(total_tokens, int) and total_tokens > 0:
             # 找到有效的 usage 锚点直接返回
-            return math.ceil(token_count * padding_factor) + total_tokens
+            token_count += total_tokens
+            break
         token_count += message_raw_tokens(messages[i])
 
     # 未找到 usage 锚点，对全部消息做估算
-    return math.ceil(token_count * padding_factor)
+    return token_count
