@@ -67,6 +67,8 @@ class OpenAIClient:
         - "reasoning_only": 流式，只打印 reasoning_content
         """
         result = {"role": "assistant"}
+        # 浅拷贝消息列表，避免篡改调用方传入的原始对象
+        messages = [dict(msg) for msg in messages]
         for msg in messages:
             # usage 不属于标准 API 消息格式需要剥离
             msg.pop("usage", None)
