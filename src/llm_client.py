@@ -5,9 +5,7 @@ import threading
 import time
 import httpx
 from openai import AsyncOpenAI
-from typing import List, Union, Optional, Literal
-from pydantic import BaseModel
-from openai.types.chat import ChatCompletion
+from typing import List, Optional, Literal
 
 from src.terminal_ui import display_stream, end_stream, launch_ui, display
 
@@ -26,14 +24,15 @@ class OpenAIClient:
                 cls._instances[cls] = super().__new__(cls)
         return cls._instances[cls]
 
-    def __init__(self, config: dict = None, model: str = None, api_key: str = None, base_url: str = None, max_concurrency: int = 3):
+    def __init__(self, config: dict = None, model: str = None, api_key: str = None, base_url: str = None,
+                 max_concurrency: int = 3):
         if getattr(self, "_initialized", False):
             return
         self._initialized = True
-        
+
         if config is None:
             config = {}
-        
+
         self.model = model if model is not None else config.get("model") or os.getenv("MODEL")
         api_key = api_key if api_key is not None else config.get("api_key") or os.getenv("API_KEY")
         base_url = base_url if base_url is not None else config.get("base_url") or os.getenv("BASE_URL")
@@ -50,12 +49,14 @@ class OpenAIClient:
         )
 
     async def invoke(
-        self,
-        messages: List[Union[dict, BaseModel]],
-        tools: Optional[List[dict]] = None,
-        temperature: float = 0,
-        stream_mode: Literal[None, "full", "reasoning_only"] = None,
-        **kwargs,
+            self,
+            messages: List[dict],
+            tools: Optional[List[dict]] = None,
+            temperature: float = 0,
+            stream_mode: Literal[None, "full", "reasoning_only"] = None,
+            reasoning_effort: str = "high",
+            reasoning_enabled: bool = True,
+            **kwargs,
     ) -> dict:
         """
         调用大语言模型推理接口，支持流式响应
@@ -66,6 +67,12 @@ class OpenAIClient:
         - "reasoning_only": 流式，只打印 reasoning_content
         """
         result = {"role": "assistant"}
+        for msg in messages:
+            # usage 不属于标准 API 消息格式需要剥离
+            msg.pop("usage", None)
+            # DeepSeek 思考模式要求 assistant 消息必须回传 reasoning_content 否则 API 返回 400，需要加一层对摘要等消息的防护
+            if msg.get("role") == "assistant":
+                msg.setdefault("reasoning_content", None)
 
         if stream_mode not in ("full", "reasoning_only"):
             stream_mode = None
@@ -79,6 +86,8 @@ class OpenAIClient:
                     tools=tools,
                     temperature=temperature,
                     stream=is_streaming,
+                    reasoning_effort=reasoning_effort,
+                    extra_body={"thinking": {"type": "enabled" if reasoning_enabled else "disabled"}},
                     **kwargs,
                 )
             except Exception as e:
@@ -92,38 +101,56 @@ class OpenAIClient:
                 # 如果服务端还没生成完，迭代器会阻塞等待下一个数据块到来，直到最后收到 [DONE] 标记
                 collected_content = []
                 collected_reasoning = []
-                collected_tool_calls = []
-                async for chunk in response:
-                    reasoning = chunk.choices[0].delta.model_extra.get("reasoning_content", "")
-                    if reasoning:
-                        display_stream(reasoning, prefix="[reasoning]")
-                        collected_reasoning.append(reasoning)
+                collected_tool_calls = {}
+                usage = None
 
-                    content = chunk.choices[0].delta.content or ""
-                    if content:
-                        if stream_mode == "full":
-                            display_stream(content)
-                        collected_content.append(content)
+                try:
+                    async for chunk in response:
+                        usage = getattr(chunk, "usage", usage)
+                        if not chunk.choices:
+                            continue
 
-                    if chunk.choices[0].delta.tool_calls:
-                        for tc in chunk.choices[0].delta.tool_calls:
-                            collected_tool_calls.append(tc.model_dump())
-                end_stream()
+                        delta = chunk.choices[0].delta
+                        reasoning = delta.model_extra.get("reasoning_content", "")
+                        if reasoning:
+                            display_stream(reasoning, prefix="[reasoning]")
+                            collected_reasoning.append(reasoning)
+
+                        content = delta.content or ""
+                        if content:
+                            if stream_mode == "full":
+                                display_stream(content)
+                            collected_content.append(content)
+
+                        # tool_calls 会按 index 分片下发，id / name 通常只在首片出现，arguments 需要逐片拼接
+                        tool_calls = delta.tool_calls or []
+                        for tc in tool_calls:
+                            slot = collected_tool_calls.setdefault(tc.index or 0, {
+                                "id": None,
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            })
+                            if tc.id:
+                                slot["id"] = tc.id
+                            if tc.type:
+                                slot["type"] = tc.type
+                            if tc.function:
+                                if tc.function.name:
+                                    slot["function"]["name"] += tc.function.name
+                                if tc.function.arguments:
+                                    slot["function"]["arguments"] += tc.function.arguments
+                finally:
+                    # 无论正常结束还是异常，都必须显式收尾流式输出，避免UI状态错乱
+                    end_stream()
 
                 result["content"] = "".join(collected_content)
                 result["reasoning_content"] = "".join(collected_reasoning)
-                result["tool_calls"] = collected_tool_calls if collected_tool_calls else None
-                usage = chunk.usage
+                result["tool_calls"] = list(collected_tool_calls.values())
+
             else:
-                if isinstance(response, str) and response.startswith("data:"):
-                    # 将SSE格式的接口响应转换为 OpenAI 格式的 ChatCompletion 对象
-                    parsed = json.loads(response[5:])
-                    if "error" in parsed:
-                        raise Exception(f"API返回错误: {parsed.get('error')}")
-                    response = ChatCompletion.model_validate(parsed)
                 message = response.choices[0].message
                 result["content"] = message.content
-                result["reasoning_content"] = response.choices[0].message.model_extra.get("reasoning_content", "")
+                result["reasoning_content"] = message.model_extra.get("reasoning_content", "")
                 result["tool_calls"] = [tc.model_dump() for tc in message.tool_calls] if message.tool_calls else None
                 usage = response.usage
 
