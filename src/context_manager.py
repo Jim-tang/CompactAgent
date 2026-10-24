@@ -159,7 +159,7 @@ class AgentContextManager:
             *history_msg,
             {"role": "user", "content": instruction}
         ]
-        response = await self.llm_client.invoke(messages, temperature=0.3)
+        response = await self.llm_client.invoke(messages, temperature=0.3, reasoning_enabled=False)
         summary = response.get("content", "").strip()
         return summary
 
