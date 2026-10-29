@@ -139,6 +139,7 @@ class TerminalUI:
         self._app: Application | None = None
         self._app_ready = threading.Event()
         self._auto_scroll = True
+        self._scroll_top = 0  # 滚动时窗口首行
         self._output_area: TextArea | None = None
         self._pending_approval: asyncio.Future | None = None  # 审批模式下挂起的 Future
 
@@ -432,46 +433,80 @@ class TerminalUI:
             return None
         return NotImplemented
 
+    def _visible_height(self) -> int:
+        """输出区当前可见行数。优先用最近一帧的渲染高度，缺省时按终端大小估算。"""
+        area = self._output_area
+        if area is not None:
+            ri = getattr(area.window, "render_info", None)
+            h = getattr(ri, "window_height", 0) if ri is not None else 0
+            if h:
+                return h
+        try:
+            rows = self._app.output.get_size().rows
+        except Exception:
+            rows = 24
+        return max(1, rows - 2)  # 减分隔线与输入行
+
     def _scroll(self, delta: int) -> None:
-        """按逻辑行滚动输出区（鼠标滚轮触发）"""
+        """按逻辑行线性滚动输出区（鼠标滚轮触发）。
+
+        直接通过自管理的 _scroll_top控制渲染，不再依赖隐藏光标，避免出现滚动延迟
+        """
         area = self._output_area
         if area is None:
             return
-
         text = area.text
         if not text:
             return
 
         n_lines = text.count("\n") + 1
-        cur_row = area.buffer.document.cursor_position_row
-        if cur_row < 0 or cur_row >= n_lines:
-            cur_row = n_lines - 1
+        height = self._visible_height()
+        bottom_top = max(0, n_lines - height)  # 贴底时窗口的首行
 
-        target = max(0, min(cur_row + delta, n_lines - 1))
+        start_top = bottom_top if self._auto_scroll else max(0, min(self._scroll_top, bottom_top))
 
-        if delta > 0 and target >= n_lines - 1:
-            # 向下滚到末尾：重新开启自动跟随，方便继续看新输出
+        if delta < 0:
+            # 向上滚动（查看更早历史）：首行上移 |delta| 行
+            new_top = max(0, start_top - abs(delta))
+        else:
+            # 向下滚动（回到较新内容）：首行下移 delta 行
+            new_top = min(bottom_top, start_top + delta)
+
+        if new_top >= bottom_top:
+            # 滚到底：恢复自动跟随，方便继续看新输出
             self._auto_scroll = True
-            area.buffer.cursor_position = len(text)
+            self._scroll_top = bottom_top
         else:
             self._auto_scroll = False
-            if target == cur_row:
-                return
-            area.buffer.cursor_position = self._line_start(text, target)
-            # 换行模式下渲染会用 cursor 推导行内偏移，归零才能保证每次滚动都从目标逻辑行的行首开始显示
-            area.window.vertical_scroll_2 = 0
+            self._scroll_top = new_top
 
         if self._app is not None:
             self._app.invalidate()
 
+    def _output_window_scroll(self, ui_content, width, height) -> None:
+        """输出区窗口的垂直滚动处理器（替换 prompt_toolkit 的 Window._scroll）。
+
+        Window._scroll 的默认实现根据“光标是否还可见”来决定滚动，光标在可视区内时即使操作滚轮视图也不会变化，所以这里改为直接锁定窗口首行。
+        """
+        win = self._output_area.window
+        n_lines = ui_content.line_count
+        if self._auto_scroll:
+            # 自动跟随：首行始终贴底
+            self._scroll_top = max(0, n_lines - height)
+        else:
+            # 手动滚动：保持用户选择的首行，并在行数/窗口变化时夹紧
+            self._scroll_top = max(0, min(self._scroll_top, max(0, n_lines - height)))
+        win.vertical_scroll = self._scroll_top
+        win.vertical_scroll_2 = 0
+
     def _scroll_to_bottom(self) -> None:
-        """重新开启自动滚动并把光标移到文本末尾（贴底）"""
+        """重新开启自动滚动并贴底（视图锁定在末尾，渲染时计算首行）"""
         self._auto_scroll = True
+        self._scroll_top = 0
         area = self._output_area
         if area is None:
             return
         area.buffer.cursor_position = len(area.text)
-        area.window.vertical_scroll_2 = 0
         if self._app is not None:
             self._app.invalidate()
 
@@ -488,6 +523,8 @@ class TerminalUI:
         )
         # 覆盖 TextArea 内部 Window 的默认滚轮处理，否则多行输出时长行上的回滚会被 prompt_toolkit 自己的滚动重算抵消
         self._output_area.window._mouse_handler = self._handle_mouse_wheel
+        # 替换 prompt_toolkit 默认的“光标驱动”滚动，避免刚开始滚动时视图无反应
+        self._output_area.window._scroll = self._output_window_scroll
 
         input_buffer = Buffer(name="input", multiline=False, enable_history_search=True)
         prompt = Window(
