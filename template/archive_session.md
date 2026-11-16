@@ -17,6 +17,45 @@ Output a single JSON object only. No explanations, no preamble, no Markdown code
   "content": "<conversation summary, at most 500 characters>",
 }
 
+### Valid example
+
+```json
+{"topic": "FastAPI P99 latency optimization under high concurrency", "keywords": ["FastAPI", "P99 latency", "connection pool", "asyncpg"], "content": "The user wanted to cut P99 latency from 800ms to under 200ms. Profiling showed the bottleneck was a pool size of 5 with 500 concurrent requests, so we raised it to 50 and moved the two blocking DB calls behind asyncio.to_thread. P99 fell to 140ms with no error-rate change. Still pending: a load test at 1000 concurrent requests."}
+```
+
+### Invalid examples (these are rejected)
+
+Reason: `content` contains a raw line break instead of the two characters `\` and `n`.
+
+```json
+{
+  "topic": "FastAPI P99 latency optimization",
+  "keywords": ["FastAPI"],
+  "content": "The user wanted to cut P99 latency.
+Profiling showed the connection pool was the bottleneck."
+}
+```
+
+Reason: `content` contains an unescaped double quote.
+
+```json
+{
+  "topic": "httpx client config",
+  "keywords": ["httpx"],
+  "content": "The user asked why the "connection pool" warning appeared."
+}
+```
+
+Reason: trailing comma after the last field.
+
+```json
+{
+  "topic": "httpx client config",
+  "keywords": ["httpx"],
+  "content": "The user asked why the pool warning appeared.",
+}
+```
+
 ## Field Requirements
 
 ### topic
@@ -26,6 +65,7 @@ Output a single JSON object only. No explanations, no preamble, no Markdown code
 
 ### content
 - Write a single coherent paragraph in the same language as the conversation's primary language. No lists, no code snippets, no turn-by-turn recap.
+- **It must stay on one physical line inside the JSON string.** If you want a paragraph break, do not press Enter — the value is one continuous string and the reader never sees raw line breaks anyway.
 - Follow the order: user's request → key process and decisions → conclusion or deliverable → pending items.
 - Must cover: what the user wanted to solve, what key judgments were made, what result was achieved.
 - If there are no pending items, do not fabricate them; if there are genuinely unfinished parts, state them explicitly.
@@ -39,6 +79,8 @@ Output a single JSON object only. No explanations, no preamble, no Markdown code
 - Use the same language as `content`.
 
 ## Hard Constraints
+- **String escaping**: every value must be a single-line JSON string. A line break inside a value must be written as the two characters `\n`, and a double quote inside a value must be written as `\"`. Raw line breaks and unescaped quotes inside strings make the output unparseable and the whole archive is discarded.
+- No trailing commas after the last field of an object or array.
 - Use only information actually present in the conversation. Do not speculate, supplement, or fabricate.
 - If the conversation is very short or lacks information, summarize faithfully and briefly; do not pad to reach a length.
 - If multiple independent topics exist, center on the one that occupies the most space or that the user clearly focused on; mention others in passing at most.
