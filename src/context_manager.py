@@ -2,6 +2,7 @@ import json
 import os
 import re
 import yaml
+import copy
 import asyncio
 from typing import Dict, List, Optional
 from datetime import datetime
@@ -25,8 +26,10 @@ class AgentContextManager:
         self.active_instructions = {}                      # 存储当前已激活技能的完整指令的字典
         self.loaded_resources = {}                         # 存储已加载的技能资源文件的字典
         self.system_message = []                           # 系统消息（静态层+动态层）
-        self.history_messages = []                         # 历史对话（不含 system）放到管理器内部维护
-        self._compaction_task = None                       # 后台压缩任务
+        self.raw_messages = []                             # 作为落盘数据源的原始消息（不压缩）
+        self.history_messages = []                         # 维护上下文的历史对话（不含 system）
+        self.memory_block = ""                             # 记忆注入块（L3 + L2索引）
+        self._compaction_task = None  # 后台压缩任务
         self.session_dir = os.path.join(util.PROJECT_ROOT, "sessions")
         self._load_system_prompt()
         self._load_all_metadata()
@@ -68,9 +71,19 @@ class AgentContextManager:
                 except:
                     pass
 
-    def add_history(self, message: dict):
-        """往管理器维护的历史对话列表中追加新的消息"""
-        self.history_messages.append(message)
+    def add_message(self, message: dict):
+        """追加一条会话消息，同时更新原始流与 LLM 视图"""
+        msg_copy = copy.deepcopy(message)
+        self.raw_messages.append(msg_copy)
+        self.history_messages.append(msg_copy)
+
+    def get_raw_messages(self) -> List[dict]:
+        """原始会话消息的只读副本（记忆模块的 L0 数据源）"""
+        return [dict(m) for m in self.raw_messages]
+
+    def set_memory_block(self, block: str) -> None:
+        """设置要注入系统提示的记忆块（L3 画像 + L2 场景索引），同一会话内不再变"""
+        self.memory_block = block or ""
 
     async def prepare_message(self):
         """上下文处理的核心方法：动态扩展 -> 压缩，然后拼接历史记录返回完整消息列表"""
@@ -116,8 +129,10 @@ class AgentContextManager:
         active_ext = self.get_active_context_extension()
         if active_ext:
             extended_content += "\n" + active_ext
-        ws_tree = util.get_workspace_tree(os.getcwd(), excludes=["mcp_service", "skills", "chroma_db"])
+        ws_tree = util.get_workspace_tree(os.getcwd(), excludes=["mcp_service", "skills", "memory_db", "sessions"])
         extended_content += f"\n[Workspace Tree] (depth=3):\n{ws_tree}"
+        if self.memory_block:
+            extended_content += f"\n{self.memory_block}"
         system_message = [{"role": "system", "content": extended_content}]
         return system_message
 
@@ -297,10 +312,12 @@ class AgentContextManager:
         return self.history_messages
 
     def reset_session(self):
-        """新会话时重置历史对话和激活的技能栈"""
+        """清空当前会话的全部对话状态"""
         self.history_messages.clear()
+        self.raw_messages.clear()
         self.active_instructions.clear()
         self.loaded_resources.clear()
+        self.memory_block = ""
 
     async def archive_session(self):
         """提炼并存储本次会话的对话历史并归档至 Sessions.md"""

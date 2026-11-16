@@ -1,10 +1,10 @@
 {
   "compression": {
     "mode": "message_count",
-    "threshold": 20,
+    "threshold": 30,
     "max_context_length": 64000,
     "reserved_tokens": 8000,
-    "keep_recent": 4
+    "keep_recent": 6
   },
   "hooks": {
     "input_blacklist": ["忽略之前的所有指令", "ignore previous instructions"],
@@ -26,18 +26,60 @@
     "runtime_approval": ["file_write", "file_edit"]
   },
   "llm": {
-    "model": "MiniMax-M2.7",
+    "model": "deepseek-v4.1-flash-1017",
     "api_key": "123",
-    "base_url": "http://127.0.0.1:8080/v1"
+    "base_url": "http://localhost:9191/v1"
   },
   "memory": {
-    "enable": false,
-    "persist_directory": "./chroma_db",
+    "enabled": false,
+    "db_path": "./memory_db/memory.sqlite3",
+
+    "persist_directory": "./memory_db/vectors",
+    "l0_export_dir": "./sessions/l0",
+    "mirror_dir": "./memory_db",
+    "log_dir": "./logs",
+
     "embedding_model": "BAAI/bge-m3",
-    "session_ttl_seconds": 3600,
-    "retrieve_threshold": 0.25,
-    "importance_threshold": 0.6,
-    "hybrid_weights": [0.6, 0.4]
+    "reranker_model": "BAAI/bge-reranker-base",
+    "local_files_only": true,
+    "enable_vector": true,
+
+    "rrf_k": 60,
+    "recall_top_k": 20,
+    "final_top_k": 4,
+    "rerank_candidates": 20,
+
+    "extract_batch_size": 10,
+    "extract_idle_seconds": 300,
+    "l0_ttl_days": 30,
+    "l0_tool_result_limit": 1000,
+    "l0_tool_arg_limit": 200,
+
+    "dedup_enabled": true,
+    "dedup_candidate_top_k": 5,
+
+    "max_scenes": 50,
+    "max_scene_chars": 1500,
+    "max_persona_chars": 2000,
+
+    "l2_min_interval_seconds": 900,
+    "l2_max_interval_seconds": 3600,
+    "persona_trigger_every_n": 3,
+    "l2_recall_enabled": true,
+    "l1_rerank_threshold": 0.2,
+    "l2_rerank_threshold": 0.2,
+    "rerank_relative_ratio": 0.5,
+    "l0_search_window": 500,
+    "scene_collection_name": "memory_l2",
+
+    "task_max_retries": 3,
+    "task_backoff_seconds": [5, 15, 45],
+    "task_stale_seconds": 600,
+    "worker_poll_seconds": 1.0,
+
+    "inject_token_budget": 300,
+
+    "prompt_mode": "code"
   },
   "mcp": {
     "servers": {
